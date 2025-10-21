@@ -411,11 +411,13 @@ if proxy_file is not None:
 proxy_df = st.sidebar.data_editor(proxy_df, num_rows="dynamic", use_container_width=True)
 
 st.sidebar.header("4) Options")
-
-rebalance = st.sidebar.selectbox("Rebalance frequency", ["Monthly"], index=0)
-
+rebalance = st.sidebar.selectbox(
+    "Rebalance frequency",
+    ["Monthly", "Quarterly", "Yearly"],
+    index=0,
+    help="Select how often to rebalance the portfolio"
+)
 log_scale = st.sidebar.checkbox("Log scale charts", value=True)
-
 st.sidebar.header("5) Run")
 
 run = st.sidebar.button("Run Backtest", type="primary")
@@ -705,4 +707,5 @@ if run and weights:
 st.caption(
 
     "Note: Some default proxies are placeholders. Edit them to better-matched indexes (e.g., Bloomberg Barclays for TIP/VCLT, MSCI sector indices, NASDAQ-100 for QQQ). If Yahoo symbol missing, replace with an available one.")
+
 

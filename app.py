@@ -332,7 +332,7 @@ def fmt_pct(x):
 
 # ------------------------------
 
-st.title("📈 ETF Backfill Portfolio Visualizer")
+st.title("📈 ETF Backfill Portfolio Visualizer테스트중")
 
 st.caption("Analyze portfolios even before ETFs existed by splicing index proxies.")
 
@@ -705,3 +705,4 @@ if run and weights:
 st.caption(
 
     "Note: Some default proxies are placeholders. Edit them to better-matched indexes (e.g., Bloomberg Barclays for TIP/VCLT, MSCI sector indices, NASDAQ-100 for QQQ). If Yahoo symbol missing, replace with an available one.")
+

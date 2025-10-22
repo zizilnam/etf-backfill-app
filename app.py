@@ -9,8 +9,6 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import matplotlib.pyplot as plt
-from auto_index_mapper import auto_map_index
-
 
 # --- 한국어 폰트 설정 (matplotlib 한글 깨짐 방지) ---
 try:
@@ -136,9 +134,9 @@ def perf_stats(series: pd.Series) -> dict:
     vol = rets.std() * math.sqrt(252)
     sharpe = (rets.mean() * 252) / (rets.std() if rets.std() != 0 else np.nan)
     mdd = (s / s.cummax() - 1).min()
-    return {"CAGR":cagr,"Volatility":vol,"Sharpe (rf=0)":sharpe,
-            "Max Drawdown":mdd,"Start":s.index[0].date(),
-            "End":s.index[-1].date(),"Length (yrs)":(n_days/365.25)}
+    return {"CAGR": cagr, "Volatility": vol, "Sharpe (rf=0)": sharpe,
+            "Max Drawdown": mdd, "Start": s.index[0].date(),
+            "End": s.index[-1].date(), "Length (yrs)": (n_days / 365.25)}
 
 
 def fmt_pct(x):
@@ -150,9 +148,6 @@ st.title("📈 ETF 백테스트 확장 분석기")
 st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다. (기간: 자동 최대)")
 
 # ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) + 자동 추종지수 & 프록시 매핑 ─────────
-import streamlit as st
-import pandas as pd
-
 st.sidebar.header("1) 포트폴리오 구성")
 
 # ── 간단 티커 → 추종지수/프록시 매핑 테이블 (필요 시 계속 보강) ──
@@ -166,7 +161,7 @@ _AUTO_MAP = {
     "MOO":  {"Index": "MVIS Global Agribusiness", "Provider": "MV Index", "ProxyTicker": "", "Notes": ""},
     "XLB":  {"Index": "S&P Materials Select Sector", "Provider": "S&P DJI", "ProxyTicker": "", "Notes": ""},
     "VDE":  {"Index": "MSCI US IMI Energy 25/50", "Provider": "MSCI", "ProxyTicker": "", "Notes": ""},
-    # 예시 추가: "SPY": {"Index": "S&P 500", "Provider": "S&P DJI", "ProxyTicker": "^GSPC", "Notes": ""},
+    # "SPY": {"Index": "S&P 500", "Provider": "S&P DJI", "ProxyTicker": "^GSPC", "Notes": ""},
 }
 
 def _auto_index_meta(ticker: str) -> dict:
@@ -262,7 +257,7 @@ def _normalize_weights():
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=_normalize_weights)
 
-# ── 여기서부터는 사이드바 수동 매핑 없이 proxy_df/mapping을 '자동' 생성 ──
+# ── 수동 매핑 없이 proxy_df/mapping 자동 생성 ──
 def _build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
     tickers = (
         portfolio_df["티커"]
@@ -276,20 +271,19 @@ def _build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
             "ETF": t,
             "Index": meta.get("Index", ""),
             "Provider": meta.get("Provider", ""),
-            "Proxy": meta.get("ProxyTicker", "") or "",  # 하위 코드에서 'Proxy' 컬럼을 기대
+            "Proxy": meta.get("ProxyTicker", "") or "",  # 하위 코드에서 'Proxy' 컬럼 사용
             "Notes": meta.get("Notes", "") or "",
         })
     return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
 
-# 하위 로직 호환용: 항상 proxy_df와 mapping이 존재하도록 생성
+# 항상 proxy_df와 mapping이 존재하도록 생성
 proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
 mapping = {
     str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
     for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()
 }
-# ────────────────────────────────────────────────────────────────────────────────
 
-# ── 2) 옵션 (번호 당김) ─────────────────────────────────────────────────────
+# ── 2) 옵션 ─────────────────────────────────────────────────────
 st.sidebar.header("2) 옵션")
 rebalance = st.sidebar.selectbox(
     "리밸런싱 주기", ["Monthly", "Quarterly", "Yearly"], index=0,
@@ -297,7 +291,7 @@ rebalance = st.sidebar.selectbox(
 )
 log_scale = st.sidebar.checkbox("로그 스케일 차트", value=True)
 
-# ── 4) 실행 (번호 당김) ─────────────────────────────────────────────────────
+# ── 4) 실행 ─────────────────────────────────────────────────────
 st.sidebar.header("4) 실행")
 run = st.sidebar.button("백테스트 실행", type="primary")
 
@@ -319,53 +313,6 @@ if run:
 
     # 가중치 dict (0~1)
     weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
-# ----- [BEGIN] 자동 proxy_df 생성: 사이드바 UI 없이도 항상 존재하게 -----
-# 간단 매핑 테이블: 필요하면 계속 보강하세요
-_AUTO_MAP = {
-    "QQQ":  {"Index": "NASDAQ-100", "Provider": "Nasdaq", "ProxyTicker": "^NDX", "Notes": ""},
-    "IEF":  {"Index": "ICE U.S. Treasury 7–10 Year", "Provider": "ICE", "ProxyTicker": "", "Notes": ""},
-    "TIP":  {"Index": "Bloomberg U.S. TIPS", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
-    "VCLT": {"Index": "Bloomberg U.S. Long Corporate", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
-    "EMLC": {"Index": "JPM GBI-EM GD (LC)", "Provider": "JPMorgan", "ProxyTicker": "", "Notes": ""},
-    "GDX":  {"Index": "NYSE Arca Gold Miners", "Provider": "NYSE Arca", "ProxyTicker": "", "Notes": ""},
-    "MOO":  {"Index": "MVIS Global Agribusiness", "Provider": "MV Index", "ProxyTicker": "", "Notes": ""},
-    "XLB":  {"Index": "S&P Materials Select Sector", "Provider": "S&P DJI", "ProxyTicker": "", "Notes": ""},
-    "VDE":  {"Index": "MSCI US IMI Energy 25/50", "Provider": "MSCI", "ProxyTicker": "", "Notes": ""},
-    # 필요 시: "SPY": {"Index":"S&P 500","Provider":"S&P DJI","ProxyTicker":"^GSPC","Notes":""},
-}
-
-def _auto_index_meta(ticker: str):
-    t = (ticker or "").strip().upper()
-    return _AUTO_MAP.get(t, {"Index": "알 수 없음", "Provider": "", "ProxyTicker": "", "Notes": ""})
-
-def build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
-    # 포트폴리오 표에서 '합계'를 제외하고 티커만 추출
-    tickers = (
-        portfolio_df["티커"]
-        .astype(str).str.upper().str.strip()
-    )
-    tickers = [t for t in tickers.unique() if t and t != "합계"]
-
-    rows = []
-    for t in tickers:
-        meta = _auto_index_meta(t)
-        # 아래 컬럼명은 하위 코드가 기대하는 이름에 맞춤: "ETF"와 "Proxy"
-        rows.append({
-            "ETF": t,
-            "Index": meta.get("Index", ""),
-            "Provider": meta.get("Provider", ""),
-            "Proxy": meta.get("ProxyTicker", "") or "",  # <-- 하위 mapping에서 쓰는 열명
-            "Notes": meta.get("Notes", "") or "",
-        })
-    return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
-
-# 하위 로직 호환용: 항상 proxy_df와 mapping이 존재하도록 생성
-proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
-mapping = {
-    str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
-    for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()
-}
-
 
     # ▶ 기간 자동: 가능한 최장 기간
     start = "1900-01-01"
@@ -453,7 +400,7 @@ mapping = {
         st.markdown(
             f"- 리밸런싱: **{rebalance}**\n"
             "- 데이터 출처: Yahoo Finance (yfinance)\n"
-            "- 기간: 자동 최대 (start={start}, end={end})\n"
+            f"- 기간: 자동 최대 (start={start}, end={end})\n"
             "- 프록시 확장: ETF 상장 전 구간을 추종지수 수익률로 보완\n"
             "- CSV 업로드 기능으로 직접 매핑 가능"
         )
@@ -476,7 +423,3 @@ mapping = {
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
-
-
-
-

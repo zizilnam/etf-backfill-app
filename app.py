@@ -9,6 +9,8 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import matplotlib.pyplot as plt
+from auto_index_mapper import auto_map_index
+
 
 # --- 한국어 폰트 설정 (matplotlib 한글 깨짐 방지) ---
 try:
@@ -150,6 +152,25 @@ st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹�
 # ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) ───────────────────────────
 st.sidebar.header("1) 포트폴리오 구성")
 
+import pandas as pd
+import streamlit as st
+
+# 🔧 (신규) 티커 → 추종지수 간단 매퍼
+def auto_map_index(ticker: str) -> str:
+    m = {
+        "QQQ":  "NASDAQ-100 (Nasdaq)",
+        "IEF":  "ICE U.S. Treasury 7–10Y (ICE)",
+        "TIP":  "Bloomberg U.S. TIPS (Bloomberg)",
+        "VCLT": "Bloomberg U.S. Long Corp (Bloomberg)",
+        "EMLC": "JPM GBI-EM GD (LC) (JPMorgan)",
+        "GDX":  "NYSE Arca Gold Miners (NYSE Arca)",
+        "MOO":  "MVIS Global Agribusiness (MV Index)",
+        "XLB":  "S&P Materials Select Sector (S&P DJI)",
+        "VDE":  "MSCI US IMI Energy 25/50 (MSCI)",
+    }
+    t = (ticker or "").strip().upper()
+    return m.get(t, "알 수 없음(ETF 가격만 사용)")
+
 default_port = pd.DataFrame({
     "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
     "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
@@ -167,8 +188,18 @@ def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
     total_row = pd.DataFrame({"티커":["합계"], "비율 (%)":[total]})
     return pd.concat([base, total_row], ignore_index=True)
 
-# 편집 가능한 단일 표(합계 포함해 보여주되, 저장 시 합계 행은 무시)
+# 🔧 (신규) 자동 추종지수 3열 채우기
+def _attach_auto_index(df_with_or_without_total: pd.DataFrame) -> pd.DataFrame:
+    out = df_with_or_without_total.copy()
+    # 합계 행은 "—" 표시, 나머지는 자동 매핑
+    out["추종지수(자동)"] = out["티커"].apply(
+        lambda x: "—" if str(x).strip().upper() == "합계" else auto_map_index(str(x))
+    )
+    return out
+
+# 편집 가능한 단일 표(합계 포함)
 editor_df_in = _append_total_row(st.session_state["portfolio_rows"])
+editor_df_in = _attach_auto_index(editor_df_in)  # ← 3열 추가
 
 edited_df_out = st.sidebar.data_editor(
     editor_df_in,
@@ -180,11 +211,18 @@ edited_df_out = st.sidebar.data_editor(
         "비율 (%)": st.column_config.NumberColumn(
             "비율 (%)", help="0~100 사이의 비율(%)", min_value=0.0, max_value=100.0, step=0.1, format="%.1f %%"
         ),
+        # 🔒 (신규) 3열은 읽기 전용
+        "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="티커 기반 자동 매핑", disabled=True),
     },
+    # 데이터에선 보이되 사용자가 수정 못 하게
+    disabled=["추종지수(자동)"],
 )
 
-def _sanitize_user_edit(df_with_total: pd.DataFrame) -> pd.DataFrame:
-    df = df_with_total.copy()
+def _sanitize_user_edit(df_with_total_and_auto: pd.DataFrame) -> pd.DataFrame:
+    df = df_with_total_and_auto.copy()
+    # (중요) 계산 컬럼은 저장 전에 제거
+    if "추종지수(자동)" in df.columns:
+        df = df.drop(columns=["추종지수(자동)"])
     # '합계' 행 제거
     df = df[df["티커"].astype(str).str.strip().str.upper() != "합계"]
     # 공백/0 정리
@@ -214,24 +252,8 @@ def normalize_weights():
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
 
-# ── 2) 추종지수 매핑 (번호 당김) ────────────────────────────────────────────
-st.sidebar.header("2) 추종지수 매핑")
-st.sidebar.caption("ETF와 그 추종지수(Proxy)를 설정합니다.")
-proxy_map_default = pd.DataFrame({
-    "ETF": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
-    "Proxy": ["^NDX", "^TNX", "^IRX", "^DJCB", "^EMHY", "^HUI", "^MXX", "^SP500-15", "^SP500-10"]
-})
-proxy_file = st.sidebar.file_uploader("CSV 업로드 (ETF,Proxy 형식)", type=["csv"])
-proxy_df = proxy_map_default.copy()
-if proxy_file is not None:
-    try:
-        proxy_df = pd.read_csv(proxy_file)
-    except Exception as e:
-        st.sidebar.error(f"CSV 읽기 실패: {e}")
-proxy_df = st.sidebar.data_editor(proxy_df, num_rows="dynamic", use_container_width=True)
-
-# ── 3) 옵션 (번호 당김) ─────────────────────────────────────────────────────
-st.sidebar.header("3) 옵션")
+# ── 2) 옵션 (번호 당김) ─────────────────────────────────────────────────────
+st.sidebar.header("2) 옵션")
 rebalance = st.sidebar.selectbox(
     "리밸런싱 주기", ["Monthly", "Quarterly", "Yearly"], index=0,
     help="포트폴리오를 재조정할 주기를 선택하세요."
@@ -374,3 +396,4 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+

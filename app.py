@@ -86,8 +86,11 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
     synth.iloc[-1] = anchor_price
 
     for i in range(len(pre_proxy) - 1, -1, -1):
-        r = proxy_ret.iloc[i]
-        synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r) if (1.0 + r) != 0 else synth.iloc[i + 1]
+        r = float(proxy_ret.iloc[i])  # ← float으로 변환
+        if (1.0 + r) != 0:
+            synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r)
+        else:
+            synth.iloc[i] = synth.iloc[i + 1]
 
     out = pd.concat([synth.iloc[:-1], etf_px.loc[anchor_date:]])
     out.name = etf
@@ -319,3 +322,4 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+

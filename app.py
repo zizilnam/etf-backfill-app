@@ -156,81 +156,82 @@ def fmt_pct(x):
 st.title("📈 ETF 백테스트 확장 분석기")
 st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다.")
 
-# ── (수정됨) 사이드바: 1) 포트폴리오 구성 ─────────────────────────────────────
+# ── 1) 포트폴리오 구성 ─────────────────────────────────────────────────────
 st.sidebar.header("1) 포트폴리오 구성")
 
 default_port = pd.DataFrame({
-    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "IAU", "BCI"],
-    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 7.5],
+    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
+    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
 })
 
 if "portfolio_table" not in st.session_state:
     st.session_state["portfolio_table"] = default_port
 
-# 1) 편집 가능한 표 (사용자가 직접 입력/수정)
-portfolio_df = st.sidebar.data_editor(
-    st.session_state["portfolio_table"],
-    num_rows="dynamic",
-    use_container_width=True,
-    key="portfolio_editor",
-    column_config={
-        "티커": st.column_config.TextColumn(
-            "티커",
-            help="예: QQQ, IEF, TIP",
-            max_chars=15,
-        ),
-        "비율 (%)": st.column_config.NumberColumn(
-            "비율 (%)",
-            help="0~100 사이의 비율(%)",
-            min_value=0.0,
-            max_value=100.0,
-            step=0.1,
-            format="%.1f %%",
-        ),
-    },
-)
+edit_mode = st.sidebar.toggle("편집 모드", value=True, help="ON: 표를 직접 수정 / OFF: 합계 포함 읽기 전용 표")
 
-# 입력 클린업
-portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
-portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
+if edit_mode:
+    # 편집 가능한 표 (오직 이것만 렌더링)
+    portfolio_df = st.sidebar.data_editor(
+        st.session_state["portfolio_table"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="portfolio_editor",
+        column_config={
+            "티커": st.column_config.TextColumn(
+                "티커",
+                help="예: QQQ, IEF, TIP",
+                max_chars=15,
+            ),
+            "비율 (%)": st.column_config.NumberColumn(
+                "비율 (%)",
+                help="0~100 사이의 비율(%)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.1f %%",
+            ),
+        },
+    )
+    # 입력 정리 & 세션 반영
+    portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
+    portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
+    st.session_state["portfolio_table"] = portfolio_df
 
-# 최신 편집본을 세션에 저장
-st.session_state["portfolio_table"] = portfolio_df
+else:
+    # 합계 행 포함 '읽기 전용' 표 (오직 이것만 렌더링)
+    portfolio_df = st.session_state["portfolio_table"].copy()
+    portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
+    portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
 
-# 2) 합계 행이 포함된 '미러 표' (읽기 전용 느낌) — 에디터 바로 아래에 붙여서 보여줌
-total_pct = float(portfolio_df["비율 (%)"].sum())
-display_df = portfolio_df.copy()
+    total_pct = float(portfolio_df["비율 (%)"].sum())
+    display_df = portfolio_df.copy()
+    sum_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total_pct]})
+    display_df = pd.concat([display_df, sum_row], ignore_index=True)
 
-# 합계 행 추가
-sum_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total_pct]})
-display_df = pd.concat([display_df, sum_row], ignore_index=True)
+    def _style_totals(df: pd.DataFrame):
+        styles = pd.DataFrame("", index=df.index, columns=df.columns)
+        last = df.index[-1]
+        styles.loc[last, "티커"] = "font-weight: bold"
+        if abs(df.loc[last, "비율 (%)"] - 100.0) < 1e-6:
+            styles.loc[last, "비율 (%)"] = "font-weight: bold"
+        else:
+            styles.loc[last, "비율 (%)"] = "color: white; background-color: #d9534f; font-weight: bold"
+        return styles
 
-# 스타일: 마지막 행(합계) 강조 + 100% 미만/초과 시 빨간색
-def _style_totals(df: pd.DataFrame):
-    styles = pd.DataFrame("", index=df.index, columns=df.columns)
-    last = df.index[-1]
-    styles.loc[last, "티커"] = "font-weight: bold"
-    if abs(df.loc[last, "비율 (%)"] - 100.0) < 1e-6:
-        styles.loc[last, "비율 (%)"] = "font-weight: bold"
-    else:
-        styles.loc[last, "비율 (%)"] = "color: white; background-color: #d9534f; font-weight: bold"
-    return styles
-
-st.sidebar.caption("현재 구성표 (아래 행에 합계 표시)")
-st.sidebar.dataframe(
-    display_df.style
-        .format({"비율 (%)": "{:.1f}%"})
-        .hide(axis="index")
-        .apply(_style_totals, axis=None),
-    use_container_width=True,
-)
+    st.sidebar.dataframe(
+        display_df.style
+            .format({"비율 (%)": "{:.1f}%"})
+            .hide(axis="index")
+            .apply(_style_totals, axis=None),
+        use_container_width=True,
+    )
 
 # 자동 보정 버튼 (합을 100으로 정규화)
 def normalize_weights():
     df = st.session_state["portfolio_table"].copy()
-    s = df["비율 (%)"].sum()
+    s = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0).sum()
     if s > 0:
-        df["비율 (%)"] = df["비율 (%)"] * (100.0 / s)
+        df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0) * (100.0 / s)
         st.session_state["portfolio_table"] = df
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
@@ -273,10 +274,11 @@ run = st.sidebar.button("백테스트 실행", type="primary")
 
 # ------------------------------ 실행 ------------------------------
 if run:
-    # (수정됨) 테이블에서 가중치 읽기
     pf = st.session_state["portfolio_table"].copy()
+    pf["티커"] = pf["티커"].astype(str).str.upper().str.strip()
+    pf["비율 (%)"] = pd.to_numeric(pf["비율 (%)"], errors="coerce").fillna(0.0)
     pf = pf[(pf["티커"].str.len() > 0) & (pf["비율 (%)"] > 0)]
-    # 총합 100%가 아니면 중단 (요구사항: 빨간색 안내 + 실행 방지)
+
     total_pct_now = float(pf["비율 (%)"].sum())
     if total_pct_now <= 0:
         st.error("비율 합은 0보다 커야 합니다.")
@@ -286,10 +288,8 @@ if run:
         st.info("TIP: 사이드바의 ‘합계 100%로 자동 보정’ 버튼을 눌러 즉시 맞출 수 있습니다.")
         st.stop()
 
-    # dict 형태의 가중치 (0~1로 변환)
     weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
 
-    # 매핑
     mapping = {str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
                for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()}
 
@@ -400,4 +400,3 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
-

@@ -86,7 +86,7 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
     synth.iloc[-1] = anchor_price
 
     for i in range(len(pre_proxy) - 1, -1, -1):
-        r = float(proxy_ret.iloc[i])  # ← float으로 변환
+        r = float(proxy_ret.iloc[i])
         if (1.0 + r) != 0:
             synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r)
         else:
@@ -156,16 +156,74 @@ def fmt_pct(x):
 st.title("📈 ETF 백테스트 확장 분석기")
 st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다.")
 
-# 사이드바 구성
+# ── (수정됨) 사이드바: 1) 포트폴리오 구성 ─────────────────────────────────────
 st.sidebar.header("1) 포트폴리오 구성")
-def_port = "QQQ:0.35, IEF:0.20, TIP:0.10, VCLT:0.10, EMLC:0.10, GDX:0.075, MOO:0.025, XLB:0.025, VDE:0.025"
-raw = st.sidebar.text_input("ETF:비율 (쉼표로 구분)", def_port)
 
+default_port = pd.DataFrame({
+    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
+    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
+})
+
+if "portfolio_table" not in st.session_state:
+    st.session_state["portfolio_table"] = default_port
+
+portfolio_df = st.sidebar.data_editor(
+    st.session_state["portfolio_table"],
+    num_rows="dynamic",
+    use_container_width=True,
+    key="portfolio_editor",
+    column_config={
+        "티커": st.column_config.TextColumn(
+            "티커",
+            help="예: QQQ, IEF, TIP",
+            max_chars=15,
+        ),
+        "비율 (%)": st.column_config.NumberColumn(
+            "비율 (%)",
+            help="0~100 사이의 비율(%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.1,
+            format="%.1f %%",
+        ),
+    },
+)
+
+# 입력 클린업
+portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
+portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
+
+# 합계 및 경고
+total_pct = float(portfolio_df["비율 (%)"].sum())
+st.sidebar.markdown("---")
+st.sidebar.subheader("합계")
+if abs(total_pct - 100.0) < 1e-6:
+    st.sidebar.success(f"총합: {total_pct:.1f}% ✅")
+elif total_pct < 100.0:
+    st.sidebar.error(f"총합: {total_pct:.1f}% (100% 미만)")
+else:
+    st.sidebar.error(f"총합: {total_pct:.1f}% (100% 초과)")
+
+# 자동 보정 버튼 (합을 100으로 정규화)
+def normalize_weights():
+    df = st.session_state["portfolio_table"].copy()
+    s = df["비율 (%)"].sum()
+    if s > 0:
+        df["비율 (%)"] = df["비율 (%)"] * (100.0 / s)
+        st.session_state["portfolio_table"] = df
+
+st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
+
+# 최신 편집본을 세션에 저장
+st.session_state["portfolio_table"] = portfolio_df
+
+# ── 2) 기간 설정 ────────────────────────────────────────────────────────────
 st.sidebar.header("2) 기간 설정")
 def_start = date(1980, 1, 1)
 start_date = st.sidebar.date_input("시작일", def_start)
 end_date = st.sidebar.date_input("종료일", date.today())
 
+# ── 3) 추종지수 매핑 ────────────────────────────────────────────────────────
 st.sidebar.header("3) 추종지수 매핑")
 st.sidebar.caption("ETF와 그 추종지수(Proxy)를 설정합니다.")
 proxy_map_default = pd.DataFrame({
@@ -181,6 +239,7 @@ if proxy_file is not None:
         st.sidebar.error(f"CSV 읽기 실패: {e}")
 proxy_df = st.sidebar.data_editor(proxy_df, num_rows="dynamic", use_container_width=True)
 
+# ── 4) 옵션 ────────────────────────────────────────────────────────────────
 st.sidebar.header("4) 옵션")
 rebalance = st.sidebar.selectbox(
     "리밸런싱 주기",
@@ -190,29 +249,30 @@ rebalance = st.sidebar.selectbox(
 )
 log_scale = st.sidebar.checkbox("로그 스케일 차트", value=True)
 
+# ── 5) 실행 ────────────────────────────────────────────────────────────────
 st.sidebar.header("5) 실행")
 run = st.sidebar.button("백테스트 실행", type="primary")
 
 # ------------------------------ 실행 ------------------------------
 if run:
-    weights = {}
-    try:
-        for part in raw.split(","):
-            if not part.strip():
-                continue
-            t, w = part.split(":")
-            weights[t.strip().upper()] = float(w.strip())
-    except Exception:
-        st.error("형식: TICKER:비율, TICKER:비율 ... 로 입력하세요.")
-        st.stop()
-
-    s = sum(weights.values())
-    if s <= 0:
+    # (수정됨) 테이블에서 가중치 읽기
+    pf = st.session_state["portfolio_table"].copy()
+    pf = pf[(pf["티커"].str.len() > 0) & (pf["비율 (%)"] > 0)]
+    # 총합 100%가 아니면 중단 (요구사항: 빨간색 안내 + 실행 방지)
+    total_pct_now = float(pf["비율 (%)"].sum())
+    if total_pct_now <= 0:
         st.error("비율 합은 0보다 커야 합니다.")
         st.stop()
-    weights = {k: v / s for k, v in weights.items()}
+    if abs(total_pct_now - 100.0) > 1e-6:
+        st.error(f"포트폴리오 비율 총합이 {total_pct_now:.1f}% 입니다. 합계가 정확히 100%가 되도록 조정하세요.")
+        st.info("TIP: 사이드바의 ‘합계 100%로 자동 보정’ 버튼을 눌러 즉시 맞출 수 있습니다.")
+        st.stop()
 
-    mapping = {row["ETF"].upper(): str(row["Proxy"]).upper()
+    # dict 형태의 가중치 (0~1로 변환)
+    weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
+
+    # 매핑
+    mapping = {str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
                for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()}
 
     start = pd.to_datetime(start_date).strftime("%Y-%m-%d")
@@ -322,4 +382,3 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
-

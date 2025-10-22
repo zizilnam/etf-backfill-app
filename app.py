@@ -149,28 +149,41 @@ def fmt_pct(x):
 st.title("📈 ETF 백테스트 확장 분석기")
 st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다. (기간: 자동 최대)")
 
-# ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) ───────────────────────────
+# ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) + 자동 추종지수 & 프록시 매핑 ─────────
+import streamlit as st
+import pandas as pd
+
 st.sidebar.header("1) 포트폴리오 구성")
 
-import pandas as pd
-import streamlit as st
+# ── 간단 티커 → 추종지수/프록시 매핑 테이블 (필요 시 계속 보강) ──
+_AUTO_MAP = {
+    "QQQ":  {"Index": "NASDAQ-100", "Provider": "Nasdaq", "ProxyTicker": "^NDX", "Notes": ""},
+    "IEF":  {"Index": "ICE U.S. Treasury 7–10 Year", "Provider": "ICE", "ProxyTicker": "", "Notes": ""},
+    "TIP":  {"Index": "Bloomberg U.S. TIPS", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
+    "VCLT": {"Index": "Bloomberg U.S. Long Corporate", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
+    "EMLC": {"Index": "JPM GBI-EM GD (LC)", "Provider": "JPMorgan", "ProxyTicker": "", "Notes": ""},
+    "GDX":  {"Index": "NYSE Arca Gold Miners", "Provider": "NYSE Arca", "ProxyTicker": "", "Notes": ""},
+    "MOO":  {"Index": "MVIS Global Agribusiness", "Provider": "MV Index", "ProxyTicker": "", "Notes": ""},
+    "XLB":  {"Index": "S&P Materials Select Sector", "Provider": "S&P DJI", "ProxyTicker": "", "Notes": ""},
+    "VDE":  {"Index": "MSCI US IMI Energy 25/50", "Provider": "MSCI", "ProxyTicker": "", "Notes": ""},
+    # 예시 추가: "SPY": {"Index": "S&P 500", "Provider": "S&P DJI", "ProxyTicker": "^GSPC", "Notes": ""},
+}
 
-# 🔧 (신규) 티커 → 추종지수 간단 매퍼
-def auto_map_index(ticker: str) -> str:
-    m = {
-        "QQQ":  "NASDAQ-100 (Nasdaq)",
-        "IEF":  "ICE U.S. Treasury 7–10Y (ICE)",
-        "TIP":  "Bloomberg U.S. TIPS (Bloomberg)",
-        "VCLT": "Bloomberg U.S. Long Corp (Bloomberg)",
-        "EMLC": "JPM GBI-EM GD (LC) (JPMorgan)",
-        "GDX":  "NYSE Arca Gold Miners (NYSE Arca)",
-        "MOO":  "MVIS Global Agribusiness (MV Index)",
-        "XLB":  "S&P Materials Select Sector (S&P DJI)",
-        "VDE":  "MSCI US IMI Energy 25/50 (MSCI)",
-    }
+def _auto_index_meta(ticker: str) -> dict:
     t = (ticker or "").strip().upper()
-    return m.get(t, "알 수 없음(ETF 가격만 사용)")
+    return _AUTO_MAP.get(t, {"Index": "알 수 없음", "Provider": "", "ProxyTicker": "", "Notes": ""})
 
+def _auto_index_label(ticker: str) -> str:
+    meta = _auto_index_meta(ticker)
+    base = meta.get("Index", "")
+    provider = meta.get("Provider", "")
+    proxy = meta.get("ProxyTicker", "")
+    label = f"{base} ({provider})" if base else "알 수 없음"
+    if proxy:
+        label += f" / proxy: {proxy}"
+    return label or "알 수 없음"
+
+# ── 기본 포트폴리오 ──
 default_port = pd.DataFrame({
     "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
     "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
@@ -185,24 +198,22 @@ def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
     base["티커"] = base["티커"].astype(str).str.upper().str.strip()
     base["비율 (%)"] = pd.to_numeric(base["비율 (%)"], errors="coerce").fillna(0.0)
     total = float(base["비율 (%)"].sum())
-    total_row = pd.DataFrame({"티커":["합계"], "비율 (%)":[total]})
+    total_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total]})
     return pd.concat([base, total_row], ignore_index=True)
 
-# 🔧 (신규) 자동 추종지수 3열 채우기
-def _attach_auto_index(df_with_or_without_total: pd.DataFrame) -> pd.DataFrame:
-    out = df_with_or_without_total.copy()
-    # 합계 행은 "—" 표시, 나머지는 자동 매핑
+def _attach_auto_index(df_in: pd.DataFrame) -> pd.DataFrame:
+    out = df_in.copy()
     out["추종지수(자동)"] = out["티커"].apply(
-        lambda x: "—" if str(x).strip().upper() == "합계" else auto_map_index(str(x))
+        lambda x: "—" if str(x).strip().upper() == "합계" else _auto_index_label(str(x))
     )
     return out
 
-# 편집 가능한 단일 표(합계 포함)
-editor_df_in = _append_total_row(st.session_state["portfolio_rows"])
-editor_df_in = _attach_auto_index(editor_df_in)  # ← 3열 추가
+# 편집 가능한 단일 표(합계 포함 / 3열 자동)
+_editor_df = _append_total_row(st.session_state["portfolio_rows"])
+_editor_df = _attach_auto_index(_editor_df)
 
 edited_df_out = st.sidebar.data_editor(
-    editor_df_in,
+    _editor_df,
     num_rows="dynamic",
     use_container_width=True,
     key="portfolio_editor",
@@ -211,16 +222,14 @@ edited_df_out = st.sidebar.data_editor(
         "비율 (%)": st.column_config.NumberColumn(
             "비율 (%)", help="0~100 사이의 비율(%)", min_value=0.0, max_value=100.0, step=0.1, format="%.1f %%"
         ),
-        # 🔒 (신규) 3열은 읽기 전용
         "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="티커 기반 자동 매핑", disabled=True),
     },
-    # 데이터에선 보이되 사용자가 수정 못 하게
-    disabled=["추종지수(자동)"],
+    disabled=["추종지수(자동)"],  # 3열은 읽기 전용
 )
 
 def _sanitize_user_edit(df_with_total_and_auto: pd.DataFrame) -> pd.DataFrame:
     df = df_with_total_and_auto.copy()
-    # (중요) 계산 컬럼은 저장 전에 제거
+    # 계산 컬럼 제거
     if "추종지수(자동)" in df.columns:
         df = df.drop(columns=["추종지수(자동)"])
     # '합계' 행 제거
@@ -228,29 +237,57 @@ def _sanitize_user_edit(df_with_total_and_auto: pd.DataFrame) -> pd.DataFrame:
     # 공백/0 정리
     df["티커"] = df["티커"].astype(str).str.upper().str.strip()
     df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0)
-    df = df[(df["티커"].str.len() > 0)]
+    df = df[df["티커"].str.len() > 0]
     return df
 
+# 세션 반영
 st.session_state["portfolio_rows"] = _sanitize_user_edit(edited_df_out)
 
-# 합계 경고(표 아래 한 줄만)
-current_total = float(st.session_state["portfolio_rows"]["비율 (%)"].sum())
-if abs(current_total - 100.0) < 1e-6:
-    st.sidebar.caption(f"✅ 합계: **{current_total:.1f}%**")
-elif current_total < 100.0:
-    st.sidebar.caption(f":red[⚠ 합계 {current_total:.1f}% — 100% 미만]")
+# 합계 경고(표 아래 한 줄)
+_current_total = float(st.session_state["portfolio_rows"]["비율 (%)"].sum())
+if abs(_current_total - 100.0) < 1e-6:
+    st.sidebar.caption(f"✅ 합계: **{_current_total:.1f}%**")
+elif _current_total < 100.0:
+    st.sidebar.caption(f":red[⚠ 합계 {_current_total:.1f}% — 100% 미만]")
 else:
-    st.sidebar.caption(f":red[⚠ 합계 {current_total:.1f}% — 100% 초과]")
+    st.sidebar.caption(f":red[⚠ 합계 {_current_total:.1f}% — 100% 초과]")
 
 # 자동 보정 버튼
-def normalize_weights():
+def _normalize_weights():
     df = st.session_state["portfolio_rows"].copy()
     s = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0).sum()
     if s > 0:
         df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0) * (100.0 / s)
         st.session_state["portfolio_rows"] = df
 
-st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
+st.sidebar.button("합계 100%로 자동 보정", on_click=_normalize_weights)
+
+# ── 여기서부터는 사이드바 수동 매핑 없이 proxy_df/mapping을 '자동' 생성 ──
+def _build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
+    tickers = (
+        portfolio_df["티커"]
+        .astype(str).str.upper().str.strip()
+    )
+    tickers = [t for t in tickers.unique() if t and t != "합계"]
+    rows = []
+    for t in tickers:
+        meta = _auto_index_meta(t)
+        rows.append({
+            "ETF": t,
+            "Index": meta.get("Index", ""),
+            "Provider": meta.get("Provider", ""),
+            "Proxy": meta.get("ProxyTicker", "") or "",  # 하위 코드에서 'Proxy' 컬럼을 기대
+            "Notes": meta.get("Notes", "") or "",
+        })
+    return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
+
+# 하위 로직 호환용: 항상 proxy_df와 mapping이 존재하도록 생성
+proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
+mapping = {
+    str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
+    for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()
+}
+# ────────────────────────────────────────────────────────────────────────────────
 
 # ── 2) 옵션 (번호 당김) ─────────────────────────────────────────────────────
 st.sidebar.header("2) 옵션")
@@ -282,6 +319,49 @@ if run:
 
     # 가중치 dict (0~1)
     weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
+# ----- [BEGIN] 자동 proxy_df 생성: 사이드바 UI 없이도 항상 존재하게 -----
+# 간단 매핑 테이블: 필요하면 계속 보강하세요
+_AUTO_MAP = {
+    "QQQ":  {"Index": "NASDAQ-100", "Provider": "Nasdaq", "ProxyTicker": "^NDX", "Notes": ""},
+    "IEF":  {"Index": "ICE U.S. Treasury 7–10 Year", "Provider": "ICE", "ProxyTicker": "", "Notes": ""},
+    "TIP":  {"Index": "Bloomberg U.S. TIPS", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
+    "VCLT": {"Index": "Bloomberg U.S. Long Corporate", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
+    "EMLC": {"Index": "JPM GBI-EM GD (LC)", "Provider": "JPMorgan", "ProxyTicker": "", "Notes": ""},
+    "GDX":  {"Index": "NYSE Arca Gold Miners", "Provider": "NYSE Arca", "ProxyTicker": "", "Notes": ""},
+    "MOO":  {"Index": "MVIS Global Agribusiness", "Provider": "MV Index", "ProxyTicker": "", "Notes": ""},
+    "XLB":  {"Index": "S&P Materials Select Sector", "Provider": "S&P DJI", "ProxyTicker": "", "Notes": ""},
+    "VDE":  {"Index": "MSCI US IMI Energy 25/50", "Provider": "MSCI", "ProxyTicker": "", "Notes": ""},
+    # 필요 시: "SPY": {"Index":"S&P 500","Provider":"S&P DJI","ProxyTicker":"^GSPC","Notes":""},
+}
+
+def _auto_index_meta(ticker: str):
+    t = (ticker or "").strip().upper()
+    return _AUTO_MAP.get(t, {"Index": "알 수 없음", "Provider": "", "ProxyTicker": "", "Notes": ""})
+
+def build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
+    # 포트폴리오 표에서 '합계'를 제외하고 티커만 추출
+    tickers = (
+        portfolio_df["티커"]
+        .astype(str).str.upper().str.strip()
+    )
+    tickers = [t for t in tickers.unique() if t and t != "합계"]
+
+    rows = []
+    for t in tickers:
+        meta = _auto_index_meta(t)
+        # 아래 컬럼명은 하위 코드가 기대하는 이름에 맞춤: "ETF"와 "Proxy"
+        rows.append({
+            "ETF": t,
+            "Index": meta.get("Index", ""),
+            "Provider": meta.get("Provider", ""),
+            "Proxy": meta.get("ProxyTicker", "") or "",  # <-- 하위 mapping에서 쓰는 열명
+            "Notes": meta.get("Notes", "") or "",
+        })
+    return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
+
+# 사이드바 수동 매핑 UI가 없어도 항상 proxy_df를 구성
+proxy_df = build_auto_proxy_df(st.session_state["portfolio_rows"])
+# ----- [END] 자동 proxy_df 생성 -----
 
     # 프록시 매핑
     mapping = {str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
@@ -396,4 +476,5 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 

@@ -241,41 +241,39 @@ def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "M
         day_ret = (row[tickers] * current_weights[tickers]).sum()
         value *= (1.0 + day_ret)
         pv.loc[dt] = value
-    return pv
+def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "Monthly") -> pd.Series:
+    """
+    Compute portfolio value with adjustable rebalancing frequency.
+    freq: "Monthly", "Quarterly", or "Yearly"
+    """
+    prices = portfolio_df.dropna(how="all").copy()
+    prices = prices.fillna(method="ffill").dropna()
+    rets = prices.pct_change().dropna()
 
+    if freq == "Monthly":
+        rebalance_dates = rets.resample('M').last().index
+    elif freq == "Quarterly":
+        rebalance_dates = rets.resample('Q').last().index
+    elif freq == "Yearly":
+        rebalance_dates = rets.resample('Y').last().index
+    else:
+        rebalance_dates = rets.resample('M').last().index
 
     tickers = list(weights.keys())
-
     w = pd.Series(weights)
 
-    # Start with base value 100
-
     pv = pd.Series(index=rets.index, dtype=float)
-
     value = 100.0
-
     current_weights = w.copy()
-
     last_reb_date = None
 
     for dt, row in rets.iterrows():
-
-        if (dt in month_ends) or (last_reb_date is None):
-
-            # Rebalance at the start of period (use previous day value)
-
+        if (dt in rebalance_dates) or (last_reb_date is None):
             current_weights = w.copy()
-
             last_reb_date = dt
-
-        # Day's portfolio return = weighted sum of asset returns
-
         day_ret = (row[tickers] * current_weights[tickers]).sum()
-
         value *= (1.0 + day_ret)
-
         pv.loc[dt] = value
-
     return pv
 
 def perf_stats(series: pd.Series) -> dict:
@@ -668,10 +666,13 @@ if run and weights:
             st.caption("Tip: If a line ends early, add or correct a proxy mapping in the sidebar and rerun.")
 
         with tabs[2]:
-
             st.subheader("Settings & Notes")
-
-            st.markdown("- Rebalance: monthly.\n- Data source: Yahoo Finance via yfinance (auto-adjusted closes).\n- Proxy extension: splices **proxy returns** before the ETF inception anchored at first overlap date.\n- You can upload your own ETF→Proxy CSV mapping in the sidebar.")
+            st.markdown(
+                f"- Rebalance: **{rebalance.lower()}**.\n"
+                "- Data source: Yahoo Finance via yfinance (auto-adjusted closes).\n"
+                "- Proxy extension: splices **proxy returns** before the ETF inception anchored at first overlap date.\n"
+                "- You can upload your own ETF→Proxy CSV mapping in the sidebar."
+            )
 
             if notes:
 
@@ -716,6 +717,7 @@ if run and weights:
 st.caption(
 
     "Note: Some default proxies are placeholders. Edit them to better-matched indexes (e.g., Bloomberg Barclays for TIP/VCLT, MSCI sector indices, NASDAQ-100 for QQQ). If Yahoo symbol missing, replace with an available one.")
+
 
 
 

@@ -208,27 +208,41 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
 
     return out
 
-def monthly_rebalance(portfolio_df: pd.DataFrame, weights: dict) -> pd.Series:
-
-    """Compute portfolio total return index with monthly rebalancing.
-
-    portfolio_df: wide DataFrame of prices for tickers (Adj Close), daily frequency
-
-    weights: dict of target weights that sum to 1
-
-    Returns: portfolio value index (base 100)
-
+def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "Monthly") -> pd.Series:
     """
-
+    Compute portfolio value with adjustable rebalancing frequency.
+    freq: "Monthly", "Quarterly", or "Yearly"
+    """
     prices = portfolio_df.dropna(how="all").copy()
-
-    prices = prices.fillna(method="ffill").dropna()  # forward-fill gaps
-
+    prices = prices.fillna(method="ffill").dropna()
     rets = prices.pct_change().dropna()
 
-    # Monthly period boundaries
+    # 주기에 따라 리샘플링 빈도 결정
+    if freq == "Monthly":
+        rebalance_dates = rets.resample('M').last().index
+    elif freq == "Quarterly":
+        rebalance_dates = rets.resample('Q').last().index
+    elif freq == "Yearly":
+        rebalance_dates = rets.resample('Y').last().index
+    else:
+        rebalance_dates = rets.resample('M').last().index  # 기본값
 
-    month_ends = rets.resample('M').last().index
+    tickers = list(weights.keys())
+    w = pd.Series(weights)
+    pv = pd.Series(index=rets.index, dtype=float)
+    value = 100.0
+    current_weights = w.copy()
+    last_reb_date = None
+
+    for dt, row in rets.iterrows():
+        if (dt in rebalance_dates) or (last_reb_date is None):
+            current_weights = w.copy()
+            last_reb_date = dt
+        day_ret = (row[tickers] * current_weights[tickers]).sum()
+        value *= (1.0 + day_ret)
+        pv.loc[dt] = value
+    return pv
+
 
     tickers = list(weights.keys())
 
@@ -548,13 +562,8 @@ if run and weights:
 
         # Portfolio series
 
-        if rebalance == "Monthly":
+        pv = flexible_rebalance(price_df, weights, freq=rebalance)
 
-            pv = monthly_rebalance(price_df, weights)
-
-        else:
-
-            pv = monthly_rebalance(price_df, weights)
 
         idx = pv / pv.iloc[0] * 100.0
 
@@ -707,5 +716,6 @@ if run and weights:
 st.caption(
 
     "Note: Some default proxies are placeholders. Edit them to better-matched indexes (e.g., Bloomberg Barclays for TIP/VCLT, MSCI sector indices, NASDAQ-100 for QQQ). If Yahoo symbol missing, replace with an available one.")
+
 
 

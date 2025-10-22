@@ -478,3 +478,4 @@ proxy_df = build_auto_proxy_df(st.session_state["portfolio_rows"])
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
 
 
+

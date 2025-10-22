@@ -38,7 +38,6 @@ st.set_page_config(page_title="ETF 백테스트 확장 분석기", layout="wide"
 # ------------------------------ Helper functions ------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_prices_yf(symbol: str, start: str, end: str) -> pd.Series:
-    """Fetch Adj Close from Yahoo Finance (daily)."""
     data = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
     if data.empty:
         return pd.Series(dtype=float)
@@ -49,7 +48,6 @@ def fetch_prices_yf(symbol: str, start: str, end: str) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd.Series:
-    """Extend ETF price history using proxy returns before inception."""
     etf_px = fetch_prices_yf(etf, start, end)
     proxy_px = fetch_prices_yf(proxy, start, end)
 
@@ -72,25 +70,18 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
         return scaled
 
     etf_overlap = etf_px.loc[overlap_start:overlap_end]
-    proxy_overlap = proxy_px.loc[overlap_start:overlap_end]
-
     anchor_date = etf_overlap.index.min()
     anchor_price = float(etf_overlap.iloc[0])
     pre_proxy = proxy_px.loc[: anchor_date].iloc[:-1]
-
     if pre_proxy.empty:
         return etf_px
 
     proxy_ret = pre_proxy.pct_change().fillna(0.0)
     synth = pd.Series(index=pre_proxy.index.append(pd.Index([anchor_date])), dtype=float)
     synth.iloc[-1] = anchor_price
-
     for i in range(len(pre_proxy) - 1, -1, -1):
         r = float(proxy_ret.iloc[i])
-        if (1.0 + r) != 0:
-            synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r)
-        else:
-            synth.iloc[i] = synth.iloc[i + 1]
+        synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r) if (1.0 + r) != 0 else synth.iloc[i + 1]
 
     out = pd.concat([synth.iloc[:-1], etf_px.loc[anchor_date:]])
     out.name = etf
@@ -98,7 +89,6 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
 
 
 def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "Monthly") -> pd.Series:
-    """Adjustable rebalancing: Monthly / Quarterly / Yearly"""
     prices = portfolio_df.dropna(how="all").fillna(method="ffill").dropna()
     rets = prices.pct_change().dropna()
 
@@ -140,12 +130,10 @@ def perf_stats(series: pd.Series) -> dict:
     cagr = (s.iloc[-1] / s.iloc[0]) ** (1 / years) - 1 if years > 0 else np.nan
     vol = rets.std() * math.sqrt(252)
     sharpe = (rets.mean() * 252) / (rets.std() if rets.std() != 0 else np.nan)
-    roll_max = s.cummax()
-    drawdown = s / roll_max - 1
-    mdd = drawdown.min()
-    return {"CAGR": cagr, "Volatility": vol, "Sharpe (rf=0)": sharpe,
-            "Max Drawdown": mdd, "Start": s.index[0].date(),
-            "End": s.index[-1].date(), "Length (yrs)": years}
+    mdd = (s / s.cummax() - 1).min()
+    return {"CAGR":cagr,"Volatility":vol,"Sharpe (rf=0)":sharpe,
+            "Max Drawdown":mdd,"Start":s.index[0].date(),
+            "End":s.index[-1].date(),"Length (yrs)":(n_days/365.25)}
 
 
 def fmt_pct(x):
@@ -156,7 +144,7 @@ def fmt_pct(x):
 st.title("📈 ETF 백테스트 확장 분석기")
 st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다.")
 
-# ── 1) 포트폴리오 구성 ─────────────────────────────────────────────────────
+# ── 1) 포트폴리오 구성 (항상 합계 포함 '단일 표') ───────────────────────────
 st.sidebar.header("1) 포트폴리오 구성")
 
 default_port = pd.DataFrame({
@@ -164,75 +152,63 @@ default_port = pd.DataFrame({
     "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
 })
 
-if "portfolio_table" not in st.session_state:
-    st.session_state["portfolio_table"] = default_port
+# 세션 초기화
+if "portfolio_rows" not in st.session_state:
+    st.session_state["portfolio_rows"] = default_port
 
-edit_mode = st.sidebar.toggle("편집 모드", value=True, help="ON: 표를 직접 수정 / OFF: 합계 포함 읽기 전용 표")
+def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
+    base = df.copy()
+    base["티커"] = base["티커"].astype(str).str.upper().str.strip()
+    base["비율 (%)"] = pd.to_numeric(base["비율 (%)"], errors="coerce").fillna(0.0)
+    total = float(base["비율 (%)"].sum())
+    total_row = pd.DataFrame({"티커":["합계"], "비율 (%)":[total]})
+    return pd.concat([base, total_row], ignore_index=True)
 
-if edit_mode:
-    # 편집 가능한 표 (오직 이것만 렌더링)
-    portfolio_df = st.sidebar.data_editor(
-        st.session_state["portfolio_table"],
-        num_rows="dynamic",
-        use_container_width=True,
-        key="portfolio_editor",
-        column_config={
-            "티커": st.column_config.TextColumn(
-                "티커",
-                help="예: QQQ, IEF, TIP",
-                max_chars=15,
-            ),
-            "비율 (%)": st.column_config.NumberColumn(
-                "비율 (%)",
-                help="0~100 사이의 비율(%)",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-                format="%.1f %%",
-            ),
-        },
-    )
-    # 입력 정리 & 세션 반영
-    portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
-    portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
-    st.session_state["portfolio_table"] = portfolio_df
+# 편집 가능한 '단일 표' (합계 행 포함해 보여주되, 저장 시 합계 행은 자동 무시)
+editor_df_in = _append_total_row(st.session_state["portfolio_rows"])
 
+edited_df_out = st.sidebar.data_editor(
+    editor_df_in,
+    num_rows="dynamic",  # 합계 아래에 행 추가해도 다음 프레임에서 정리됨
+    use_container_width=True,
+    key="portfolio_editor",
+    column_config={
+        "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, TIP", max_chars=15),
+        "비율 (%)": st.column_config.NumberColumn(
+            "비율 (%)", help="0~100 사이의 비율(%)", min_value=0.0, max_value=100.0, step=0.1, format="%.1f %%"
+        ),
+    },
+)
+
+# 사용자가 '합계' 행을 수정/삭제하더라도, 저장 시 무시하고 원본만 갱신
+def _sanitize_user_edit(df_with_total: pd.DataFrame) -> pd.DataFrame:
+    df = df_with_total.copy()
+    # 1) '합계' 행 제거
+    df = df[df["티커"].astype(str).str.strip().str.upper() != "합계"]
+    # 2) 공백/0인 행 정리
+    df["티커"] = df["티커"].astype(str).str.upper().str.strip()
+    df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0)
+    df = df[(df["티커"].str.len() > 0)]
+    return df
+
+st.session_state["portfolio_rows"] = _sanitize_user_edit(edited_df_out)
+
+# 합계 계산 & 경고(표 아래 한 줄만, 테이블은 항상 1개만 표시)
+current_total = float(st.session_state["portfolio_rows"]["비율 (%)"].sum())
+if abs(current_total - 100.0) < 1e-6:
+    st.sidebar.caption(f"✅ 합계: **{current_total:.1f}%**")
+elif current_total < 100.0:
+    st.sidebar.caption(f":red[⚠ 합계 {current_total:.1f}% — 100% 미만]")
 else:
-    # 합계 행 포함 '읽기 전용' 표 (오직 이것만 렌더링)
-    portfolio_df = st.session_state["portfolio_table"].copy()
-    portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
-    portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
+    st.sidebar.caption(f":red[⚠ 합계 {current_total:.1f}% — 100% 초과]")
 
-    total_pct = float(portfolio_df["비율 (%)"].sum())
-    display_df = portfolio_df.copy()
-    sum_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total_pct]})
-    display_df = pd.concat([display_df, sum_row], ignore_index=True)
-
-    def _style_totals(df: pd.DataFrame):
-        styles = pd.DataFrame("", index=df.index, columns=df.columns)
-        last = df.index[-1]
-        styles.loc[last, "티커"] = "font-weight: bold"
-        if abs(df.loc[last, "비율 (%)"] - 100.0) < 1e-6:
-            styles.loc[last, "비율 (%)"] = "font-weight: bold"
-        else:
-            styles.loc[last, "비율 (%)"] = "color: white; background-color: #d9534f; font-weight: bold"
-        return styles
-
-    st.sidebar.dataframe(
-        display_df.style
-            .format({"비율 (%)": "{:.1f}%"})
-            .hide(axis="index")
-            .apply(_style_totals, axis=None),
-        use_container_width=True,
-    )
-
-# 자동 보정 버튼 (합을 100으로 정규화)
+# 자동 보정 버튼
 def normalize_weights():
-    df = st.session_state["portfolio_table"].copy()
+    df = st.session_state["portfolio_rows"].copy()
     s = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0).sum()
     if s > 0:
         df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0) * (100.0 / s)
-        st.session_state["portfolio_table"] = df
+        st.session_state["portfolio_rows"] = df
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
 
@@ -261,9 +237,7 @@ proxy_df = st.sidebar.data_editor(proxy_df, num_rows="dynamic", use_container_wi
 # ── 4) 옵션 ────────────────────────────────────────────────────────────────
 st.sidebar.header("4) 옵션")
 rebalance = st.sidebar.selectbox(
-    "리밸런싱 주기",
-    ["Monthly", "Quarterly", "Yearly"],
-    index=0,
+    "리밸런싱 주기", ["Monthly", "Quarterly", "Yearly"], index=0,
     help="포트폴리오를 재조정할 주기를 선택하세요."
 )
 log_scale = st.sidebar.checkbox("로그 스케일 차트", value=True)
@@ -274,7 +248,7 @@ run = st.sidebar.button("백테스트 실행", type="primary")
 
 # ------------------------------ 실행 ------------------------------
 if run:
-    pf = st.session_state["portfolio_table"].copy()
+    pf = st.session_state["portfolio_rows"].copy()
     pf["티커"] = pf["티커"].astype(str).str.upper().str.strip()
     pf["비율 (%)"] = pd.to_numeric(pf["비율 (%)"], errors="coerce").fillna(0.0)
     pf = pf[(pf["티커"].str.len() > 0) & (pf["비율 (%)"] > 0)]
@@ -357,7 +331,7 @@ if run:
                 f"{stats.get('Length (yrs)', 0):.1f}",
             ]
         }, index=["CAGR", "Volatility (연율)", "Sharpe (rf=0)", "최대손실", "시작", "종료", "기간(년)"])
-        st.dataframe(stats_tbl)
+        st.dataframe(stats_tbl, use_container_width=True)
 
     with tabs[1]:
         st.subheader("📊 개별 ETF 가격 추이 (기준=100)")

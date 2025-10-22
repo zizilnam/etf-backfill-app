@@ -160,13 +160,14 @@ st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹�
 st.sidebar.header("1) 포트폴리오 구성")
 
 default_port = pd.DataFrame({
-    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
-    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 2.5, 2.5, 2.5],
+    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "IAU", "BCI"],
+    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 7.5],
 })
 
 if "portfolio_table" not in st.session_state:
     st.session_state["portfolio_table"] = default_port
 
+# 1) 편집 가능한 표 (사용자가 직접 입력/수정)
 portfolio_df = st.sidebar.data_editor(
     st.session_state["portfolio_table"],
     num_rows="dynamic",
@@ -193,16 +194,36 @@ portfolio_df = st.sidebar.data_editor(
 portfolio_df["티커"] = portfolio_df["티커"].astype(str).str.upper().str.strip()
 portfolio_df["비율 (%)"] = pd.to_numeric(portfolio_df["비율 (%)"], errors="coerce").fillna(0.0)
 
-# 합계 및 경고
+# 최신 편집본을 세션에 저장
+st.session_state["portfolio_table"] = portfolio_df
+
+# 2) 합계 행이 포함된 '미러 표' (읽기 전용 느낌) — 에디터 바로 아래에 붙여서 보여줌
 total_pct = float(portfolio_df["비율 (%)"].sum())
-st.sidebar.markdown("---")
-st.sidebar.subheader("합계")
-if abs(total_pct - 100.0) < 1e-6:
-    st.sidebar.success(f"총합: {total_pct:.1f}% ✅")
-elif total_pct < 100.0:
-    st.sidebar.error(f"총합: {total_pct:.1f}% (100% 미만)")
-else:
-    st.sidebar.error(f"총합: {total_pct:.1f}% (100% 초과)")
+display_df = portfolio_df.copy()
+
+# 합계 행 추가
+sum_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total_pct]})
+display_df = pd.concat([display_df, sum_row], ignore_index=True)
+
+# 스타일: 마지막 행(합계) 강조 + 100% 미만/초과 시 빨간색
+def _style_totals(df: pd.DataFrame):
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+    last = df.index[-1]
+    styles.loc[last, "티커"] = "font-weight: bold"
+    if abs(df.loc[last, "비율 (%)"] - 100.0) < 1e-6:
+        styles.loc[last, "비율 (%)"] = "font-weight: bold"
+    else:
+        styles.loc[last, "비율 (%)"] = "color: white; background-color: #d9534f; font-weight: bold"
+    return styles
+
+st.sidebar.caption("현재 구성표 (아래 행에 합계 표시)")
+st.sidebar.dataframe(
+    display_df.style
+        .format({"비율 (%)": "{:.1f}%"})
+        .hide(axis="index")
+        .apply(_style_totals, axis=None),
+    use_container_width=True,
+)
 
 # 자동 보정 버튼 (합을 100으로 정규화)
 def normalize_weights():
@@ -213,9 +234,6 @@ def normalize_weights():
         st.session_state["portfolio_table"] = df
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
-
-# 최신 편집본을 세션에 저장
-st.session_state["portfolio_table"] = portfolio_df
 
 # ── 2) 기간 설정 ────────────────────────────────────────────────────────────
 st.sidebar.header("2) 기간 설정")
@@ -382,3 +400,4 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+

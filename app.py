@@ -1,5 +1,5 @@
 # ----------------------------------------------------------------------------
-# ETF 백테스트 확장 분석기 (with Index Proxies)
+# ETF 백테스트 확장 분석기 (with Index Proxies) — Auto Max Period
 # ----------------------------------------------------------------------------
 import io
 import math
@@ -38,6 +38,7 @@ st.set_page_config(page_title="ETF 백테스트 확장 분석기", layout="wide"
 # ------------------------------ Helper functions ------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_prices_yf(symbol: str, start: str, end: str) -> pd.Series:
+    """Fetch Close (auto_adjusted) from Yahoo Finance (daily)."""
     data = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
     if data.empty:
         return pd.Series(dtype=float)
@@ -48,6 +49,7 @@ def fetch_prices_yf(symbol: str, start: str, end: str) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd.Series:
+    """Extend ETF price history using proxy returns before inception."""
     etf_px = fetch_prices_yf(etf, start, end)
     proxy_px = fetch_prices_yf(proxy, start, end)
 
@@ -89,6 +91,7 @@ def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd
 
 
 def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "Monthly") -> pd.Series:
+    """Adjustable rebalancing: Monthly / Quarterly / Yearly"""
     prices = portfolio_df.dropna(how="all").fillna(method="ffill").dropna()
     rets = prices.pct_change().dropna()
 
@@ -142,9 +145,9 @@ def fmt_pct(x):
 
 # ------------------------------ UI ------------------------------
 st.title("📈 ETF 백테스트 확장 분석기")
-st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다.")
+st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다. (기간: 자동 최대)")
 
-# ── 1) 포트폴리오 구성 (항상 합계 포함 '단일 표') ───────────────────────────
+# ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) ───────────────────────────
 st.sidebar.header("1) 포트폴리오 구성")
 
 default_port = pd.DataFrame({
@@ -164,12 +167,12 @@ def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
     total_row = pd.DataFrame({"티커":["합계"], "비율 (%)":[total]})
     return pd.concat([base, total_row], ignore_index=True)
 
-# 편집 가능한 '단일 표' (합계 행 포함해 보여주되, 저장 시 합계 행은 자동 무시)
+# 편집 가능한 단일 표(합계 포함해 보여주되, 저장 시 합계 행은 무시)
 editor_df_in = _append_total_row(st.session_state["portfolio_rows"])
 
 edited_df_out = st.sidebar.data_editor(
     editor_df_in,
-    num_rows="dynamic",  # 합계 아래에 행 추가해도 다음 프레임에서 정리됨
+    num_rows="dynamic",
     use_container_width=True,
     key="portfolio_editor",
     column_config={
@@ -180,12 +183,11 @@ edited_df_out = st.sidebar.data_editor(
     },
 )
 
-# 사용자가 '합계' 행을 수정/삭제하더라도, 저장 시 무시하고 원본만 갱신
 def _sanitize_user_edit(df_with_total: pd.DataFrame) -> pd.DataFrame:
     df = df_with_total.copy()
-    # 1) '합계' 행 제거
+    # '합계' 행 제거
     df = df[df["티커"].astype(str).str.strip().str.upper() != "합계"]
-    # 2) 공백/0인 행 정리
+    # 공백/0 정리
     df["티커"] = df["티커"].astype(str).str.upper().str.strip()
     df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0)
     df = df[(df["티커"].str.len() > 0)]
@@ -193,7 +195,7 @@ def _sanitize_user_edit(df_with_total: pd.DataFrame) -> pd.DataFrame:
 
 st.session_state["portfolio_rows"] = _sanitize_user_edit(edited_df_out)
 
-# 합계 계산 & 경고(표 아래 한 줄만, 테이블은 항상 1개만 표시)
+# 합계 경고(표 아래 한 줄만)
 current_total = float(st.session_state["portfolio_rows"]["비율 (%)"].sum())
 if abs(current_total - 100.0) < 1e-6:
     st.sidebar.caption(f"✅ 합계: **{current_total:.1f}%**")
@@ -212,14 +214,8 @@ def normalize_weights():
 
 st.sidebar.button("합계 100%로 자동 보정", on_click=normalize_weights)
 
-# ── 2) 기간 설정 ────────────────────────────────────────────────────────────
-st.sidebar.header("2) 기간 설정")
-def_start = date(1980, 1, 1)
-start_date = st.sidebar.date_input("시작일", def_start)
-end_date = st.sidebar.date_input("종료일", date.today())
-
-# ── 3) 추종지수 매핑 ────────────────────────────────────────────────────────
-st.sidebar.header("3) 추종지수 매핑")
+# ── 2) 추종지수 매핑 (번호 당김) ────────────────────────────────────────────
+st.sidebar.header("2) 추종지수 매핑")
 st.sidebar.caption("ETF와 그 추종지수(Proxy)를 설정합니다.")
 proxy_map_default = pd.DataFrame({
     "ETF": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "GDX", "MOO", "XLB", "VDE"],
@@ -234,16 +230,16 @@ if proxy_file is not None:
         st.sidebar.error(f"CSV 읽기 실패: {e}")
 proxy_df = st.sidebar.data_editor(proxy_df, num_rows="dynamic", use_container_width=True)
 
-# ── 4) 옵션 ────────────────────────────────────────────────────────────────
-st.sidebar.header("4) 옵션")
+# ── 3) 옵션 (번호 당김) ─────────────────────────────────────────────────────
+st.sidebar.header("3) 옵션")
 rebalance = st.sidebar.selectbox(
     "리밸런싱 주기", ["Monthly", "Quarterly", "Yearly"], index=0,
     help="포트폴리오를 재조정할 주기를 선택하세요."
 )
 log_scale = st.sidebar.checkbox("로그 스케일 차트", value=True)
 
-# ── 5) 실행 ────────────────────────────────────────────────────────────────
-st.sidebar.header("5) 실행")
+# ── 4) 실행 (번호 당김) ─────────────────────────────────────────────────────
+st.sidebar.header("4) 실행")
 run = st.sidebar.button("백테스트 실행", type="primary")
 
 # ------------------------------ 실행 ------------------------------
@@ -262,13 +258,16 @@ if run:
         st.info("TIP: 사이드바의 ‘합계 100%로 자동 보정’ 버튼을 눌러 즉시 맞출 수 있습니다.")
         st.stop()
 
+    # 가중치 dict (0~1)
     weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
 
+    # 프록시 매핑
     mapping = {str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
                for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()}
 
-    start = pd.to_datetime(start_date).strftime("%Y-%m-%d")
-    end = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+    # ▶ 기간 자동: 가능한 최장 기간
+    start = "1900-01-01"
+    end = pd.to_datetime(date.today()).strftime("%Y-%m-%d")
 
     tabs = st.tabs(["포트폴리오", "구성종목", "설정 및 참고"])
     all_prices, notes = {}, []
@@ -352,6 +351,7 @@ if run:
         st.markdown(
             f"- 리밸런싱: **{rebalance}**\n"
             "- 데이터 출처: Yahoo Finance (yfinance)\n"
+            "- 기간: 자동 최대 (start={start}, end={end})\n"
             "- 프록시 확장: ETF 상장 전 구간을 추종지수 수익률로 보완\n"
             "- CSV 업로드 기능으로 직접 매핑 가능"
         )

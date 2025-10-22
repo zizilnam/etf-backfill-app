@@ -359,13 +359,13 @@ def build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
 
-# 사이드바 수동 매핑 UI가 없어도 항상 proxy_df를 구성
-proxy_df = build_auto_proxy_df(st.session_state["portfolio_rows"])
-# ----- [END] 자동 proxy_df 생성 -----
+# 하위 로직 호환용: 항상 proxy_df와 mapping이 존재하도록 생성
+proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
+mapping = {
+    str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
+    for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()
+}
 
-    # 프록시 매핑
-    mapping = {str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
-               for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()}
 
     # ▶ 기간 자동: 가능한 최장 기간
     start = "1900-01-01"
@@ -476,6 +476,7 @@ proxy_df = build_auto_proxy_df(st.session_state["portfolio_rows"])
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

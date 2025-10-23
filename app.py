@@ -9,6 +9,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import matplotlib.pyplot as plt
+from etf_audit import audit_and_autofix_proxies, PROXY_MAP, save_proxy_map_json
 
 # --- 대표 포트폴리오 비교 섹션에 '설명'을 붙이는 드롭인 스니펫 ---
 # 이 블록만 복사해서 app.py의 "대표 포트폴리오 비교" 자리에 붙여넣으면 됩니다.
@@ -17,7 +18,15 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
+
+# 앱 실행 시 매핑 테이블 로드
+if os.path.exists("PROXY_MAP.json"):
+    proxy_map = load_proxy_map_json("PROXY_MAP.json")
+else:
+    from etf_audit import PROXY_MAP as proxy_map
+    
 # 1) 데이터 정의: 구성 + 설명 (원하면 티커/비중 자유 수정)
 PRESETS_WITH_DESC = {
     "60:40 포트폴리오": {
@@ -568,6 +577,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

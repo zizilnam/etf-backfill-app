@@ -258,9 +258,8 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # --- 사용 가이드 ---
+st.markdown("---")
 st.markdown("### 🧭 환영합니다!")
-st.caption("ETF 상장 전 기간까지 추종지수로 백테스트할 수 있는 투자 입문자용 웹앱입니다.")
-
 st.write("""
 이 웹앱은 **ETF 상장 이전 기간**까지도 추종지수를 이용해 백테스트할 수 있어, 
 과거부터 지금까지의 장기 성과를 살펴볼 수 있습니다.
@@ -569,6 +568,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

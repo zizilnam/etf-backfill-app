@@ -19,7 +19,8 @@ if os.path.exists("PROXY_MAP.json"):
     proxy_map = load_proxy_map_json("PROXY_MAP.json")
 else:
     proxy_map = PROXY_MAP  # 기본 매핑
-
+    
+user_tickers = ["QQQ", "IAU", "BCI", "IEF"]
 # 누락된 프록시 자동 점검 및 매핑
 report, updated_map = audit_and_autofix_proxies(user_tickers, proxy_map)
 # --- 대표 포트폴리오 비교 섹션에 '설명'을 붙이는 드롭인 스니펫 ---
@@ -588,6 +589,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

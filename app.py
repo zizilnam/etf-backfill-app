@@ -12,7 +12,13 @@ import matplotlib.pyplot as plt
 from etf_audit import audit_and_autofix_proxies, PROXY_MAP, save_proxy_map_json
 from etf_audit import PROXY_MAP
 # 사용자가 입력한 포트폴리오 티커 목록 예시
-user_tickers = ["QQQ", "IAU", "BCI", "IEF"]
+from etf_audit import audit_and_autofix_proxies, load_proxy_map_json, PROXY_MAP
+import os
+
+if os.path.exists("PROXY_MAP.json"):
+    proxy_map = load_proxy_map_json("PROXY_MAP.json")
+else:
+    proxy_map = PROXY_MAP  # 기본 매핑
 
 # 누락된 프록시 자동 점검 및 매핑
 report, updated_map = audit_and_autofix_proxies(user_tickers, proxy_map)
@@ -582,6 +588,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

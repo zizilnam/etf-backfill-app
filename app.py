@@ -330,6 +330,42 @@ _AUTO_MAP = {
     # "SPY": {"Index": "S&P 500", "Provider": "S&P DJI", "ProxyTicker": "^GSPC", "Notes": ""},
 }
 
+
+def _fallback_proxy_for_fred(series_code: str, etf: str) -> str:
+    etf_u = (etf or "").upper()
+    s = (series_code or "").upper()
+    # 금
+    if "GOLD" in s or etf_u in {"IAU", "GLD"}:
+        return "GLD" # 또는 "XAUUSD=X"
+    # 원자재/상품지수
+    if "GSCI" in s or "BCOM" in s or etf_u in {"BCI", "DBC"}:
+        return "^SPGSCI" # 또는 "DBC"
+    # 기본: 빈 문자열 (미정)
+    return ""
+    
+
+
+
+def _resolve_proxy_ticker(etf: str, updated_map: dict) -> str:
+    # 1) etf_audit 자동 매핑 우선
+    spec = updated_map.get(etf)
+    if spec:
+        src = (getattr(spec, "source", None) or spec.get("source") or "").upper()
+        series = getattr(spec, "series", None) or spec.get("series") or ""
+        if src == "YF":
+            return series
+        elif src == "FRED":
+            return _fallback_proxy_for_fred(series, etf)
+    # 2) 로컬 _AUTO_MAP
+    meta = _AUTO_MAP.get(etf)
+    if meta and meta.get("ProxyTicker"):
+        return str(meta["ProxyTicker"]).upper()
+    # 3) 키워드 규칙 (이름만으로 유추)
+    t = etf.upper()
+    if t in {"IAU", "GLD"}: return "GLD"
+    if t in {"BCI", "DBC"}: return "^SPGSCI"
+    return ""
+
 def _auto_index_meta(ticker: str) -> dict:
     t = (ticker or "").strip().upper()
     return _AUTO_MAP.get(t, {"Index": "알 수 없음", "Provider": "", "ProxyTicker": "", "Notes": ""})
@@ -362,13 +398,16 @@ def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
     total_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total]})
     return pd.concat([base, total_row], ignore_index=True)
 
-def _attach_auto_index(df_in: pd.DataFrame) -> pd.DataFrame:
+def attach_auto_index_label(df_in: pd.DataFrame, proxy_table: pd.DataFrame) -> pd.DataFrame:
+    label_map = {row.ETF: row.Label for _, row in proxy_table.iterrows()}
     out = df_in.copy()
-    out["추종지수(자동)"] = out["티커"].apply(
-        lambda x: "—" if str(x).strip().upper() == "합계" else _auto_index_label(str(x))
-    )
+    def _lab(x):
+        t = str(x).strip().upper()
+        if t == "합계":
+            return "—"
+        return label_map.get(t, "알 수 없음")
+    out["추종지수(자동)"] = out["티커"].apply(_lab)
     return out
-
 # 편집 가능한 단일 표(합계 포함 / 3열 자동)
 _editor_df = _append_total_row(st.session_state["portfolio_rows"])
 _editor_df = _attach_auto_index(_editor_df)
@@ -424,24 +463,31 @@ def _normalize_weights():
 st.sidebar.button("합계 100%로 자동 보정", on_click=_normalize_weights)
 
 # ── 수동 매핑 없이 proxy_df/mapping 자동 생성 ──
-def _build_auto_proxy_df(portfolio_df: pd.DataFrame) -> pd.DataFrame:
+def build_proxy_table_with_autofix(portfolio_df: pd.DataFrame, updated_map: dict) -> tuple[pd.DataFrame, dict]:
     tickers = (
-        portfolio_df["티커"]
-        .astype(str).str.upper().str.strip()
+        portfolio_df["티커"].astype(str).str.upper().str.strip()
     )
     tickers = [t for t in tickers.unique() if t and t != "합계"]
-    rows = []
+
+    rows, mapping = [], {}
     for t in tickers:
-        meta = _auto_index_meta(t)
+        meta = _AUTO_MAP.get(t, {"Index": "", "Provider": "", "ProxyTicker": "", "Notes": ""})
+        proxy = _resolve_proxy_ticker(t, updated_map)
+        mapping[t] = proxy
+        label = f"{meta.get('Index','알 수 없음')} ({meta.get('Provider','')})".strip()
+        if proxy:
+            label = (label if label and label != "( )" else "자동 유추") + f" / proxy: {proxy}"
         rows.append({
             "ETF": t,
-            "Index": meta.get("Index", ""),
+            "Index": meta.get("Index", "알 수 없음") or "알 수 없음",
             "Provider": meta.get("Provider", ""),
-            "Proxy": meta.get("ProxyTicker", "") or "",  # 하위 코드에서 'Proxy' 컬럼 사용
-            "Notes": meta.get("Notes", "") or "",
+            "Proxy": proxy,
+            "Notes": meta.get("Notes", ""),
+            "Label": label,
         })
-    return pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes"])
 
+    df = pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes", "Label"])
+    return df, mapping
 # 항상 proxy_df와 mapping이 존재하도록 생성
 proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
 mapping = {
@@ -589,6 +635,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

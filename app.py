@@ -1,65 +1,250 @@
-# ----------------------------------------------------------------------------
-# ETF 백테스트 확장 분석기 (with Index Proxies) — Auto Max Period
-# ----------------------------------------------------------------------------
+# -*- coding: utf-8 -*-
+# app.py — Integrated Streamlit app
+# - Friendly intro for beginners (Korean)
+# - Representative portfolio presets (60:40, All Weather, GAA) with descriptions + pie
+# - Sidebar editor shows "추종지수(자동)" without "알 수 없음" spam
+# - Auto audit & proxy mapping for ETFs (incl. IAU, BCI)
+# - Hybrid backfill: pre‑listing period uses proxy; post‑listing uses ETF
+# - Simple backtest: portfolio index, CAGR/Vol/MDD
+
+from __future__ import annotations
+import os
 import io
 import math
-from datetime import date
+import json
+import re
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, date
+
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import streamlit as st
 import matplotlib.pyplot as plt
-from etf_audit import audit_and_autofix_proxies, PROXY_MAP, save_proxy_map_json
-from etf_audit import PROXY_MAP
-# 사용자가 입력한 포트폴리오 티커 목록 예시
-from etf_audit import audit_and_autofix_proxies, load_proxy_map_json, PROXY_MAP
-import os
 
-if os.path.exists("PROXY_MAP.json"):
-    proxy_map = load_proxy_map_json("PROXY_MAP.json")
-else:
-    proxy_map = PROXY_MAP  # 기본 매핑
-    
-user_tickers = ["QQQ", "IAU", "BCI", "IEF"]
-# 누락된 프록시 자동 점검 및 매핑
-report, updated_map = audit_and_autofix_proxies(user_tickers, proxy_map)
-# --- 대표 포트폴리오 비교 섹션에 '설명'을 붙이는 드롭인 스니펫 ---
-# 이 블록만 복사해서 app.py의 "대표 포트폴리오 비교" 자리에 붙여넣으면 됩니다.
-# 핵심: PRESETS 딕셔너리에서 desc/why 필드로 설명을 정의하고, 렌더러가 이를 보여줍니다.
+# Optional: Korean font for matplotlib (best‑effort)
+try:
+    from matplotlib import font_manager, rcParams
+    # Common paths on Linux/Windows. Add your own if needed.
+    CANDIDATES = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "C:/Windows/Fonts/malgun.ttf",
+    ]
+    for p in CANDIDATES:
+        if os.path.exists(p):
+            font_manager.fontManager.addfont(p)
+            rcParams["font.family"] = font_manager.FontProperties(fname=p).get_name()
+            break
+    rcParams["axes.unicode_minus"] = False
+except Exception:
+    pass
 
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import os
+# -----------------------------
+# Page Config
+# -----------------------------
+st.set_page_config(page_title="ETF Backfill Portfolio Visualizer", layout="wide")
 
+# =============================
+# Data & Mapping Layer
+# =============================
+@dataclass
+class ProxySpec:
+    source: str   # "YF"(Yahoo) | "FRED"(not used directly in loader here)
+    series: str   # Yahoo symbol (preferred in this app)
+    name: str
+    transform: str = "identity"
 
-# 앱 실행 시 매핑 테이블 로드
-if os.path.exists("PROXY_MAP.json"):
-    proxy_map = load_proxy_map_json("PROXY_MAP.json")
-else:
-    from etf_audit import PROXY_MAP as proxy_map
-    
-# 1) 데이터 정의: 구성 + 설명 (원하면 티커/비중 자유 수정)
-PRESETS_WITH_DESC = {
+# Base proxy map — include troublesome ones (IAU/BCI) mapped to Yahoo‑loadable proxies
+BASE_PROXY_MAP: Dict[str, ProxySpec] = {
+    # Stocks / Bonds examples
+    "QQQ":  ProxySpec("YF", "^NDX", "NASDAQ‑100 Index"),   # Use index symbol for longer history
+    "SPY":  ProxySpec("YF", "^GSPC", "S&P 500 Index"),
+    "VTI":  ProxySpec("YF", "VTI", "Total U.S. Stock (ETF proxy)"),
+    "VEA":  ProxySpec("YF", "VEA", "Dev ex‑US (ETF proxy)"),
+    "VWO":  ProxySpec("YF", "VWO", "EM Equities (ETF proxy)"),
+    "VNQ":  ProxySpec("YF", "VNQ", "U.S. REITs (ETF proxy)"),
+    "IEF":  ProxySpec("YF", "IEF", "U.S. Treasury 7‑10y (ETF proxy)"),
+    "VGLT": ProxySpec("YF", "VGLT", "U.S. Treasury Long (ETF proxy)"),
+    "BND":  ProxySpec("YF", "AGG", "U.S. Aggregate (AGG as proxy)"),
+    "AGG":  ProxySpec("YF", "AGG", "U.S. Aggregate Bonds"),
+    "BIL":  ProxySpec("YF", "BIL", "1‑3M T‑Bill"),
+    # Commodities & Gold — the troublemakers
+    "IAU":  ProxySpec("YF", "GLD",     "Gold proxy via GLD"),
+    "GLD":  ProxySpec("YF", "GLD",     "Gold proxy via GLD"),
+    "IAU.M":ProxySpec("YF", "GLD",     "Gold proxy via GLD"),
+    "IAUUSD":ProxySpec("YF", "XAUUSD=X","Spot Gold USD"),
+    "DBC":  ProxySpec("YF", "DBC",     "Broad Commodities (ETF)"),
+    "BCI":  ProxySpec("YF", "^SPGSCI", "S&P GSCI Index (broad commodity)"),
+}
+
+# Lightweight yfinance helpers
+@st.cache_data(show_spinner=False)
+def yf_download(symbol: str, start: str = "1970-01-01", end: Optional[str] = None, auto_adjust: bool = True) -> pd.Series:
+    import yfinance as yf
+    df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=auto_adjust)
+    if df.empty:
+        return pd.Series(dtype=float, name=symbol)
+    # Prefer Adj Close if present
+    col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    s = df[col].dropna()
+    s.name = symbol
+    return s
+
+@st.cache_data(show_spinner=False)
+def yf_info(ticker: str) -> dict:
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        return {
+            "longName": info.get("longName"),
+            "shortName": info.get("shortName"),
+            "underlyingIndex": info.get("underlyingIndex"),
+            "category": info.get("category"),
+            "fundFamily": info.get("fundFamily"),
+        }
+    except Exception:
+        return {}
+
+# Rules to guess proxies from metadata text
+_RULES: List[Tuple[re.Pattern, ProxySpec]] = [
+    (re.compile(r"gold|금", re.I), ProxySpec("YF", "GLD", "Gold proxy via GLD")),
+    (re.compile(r"commodity|원자재|gsci|bcom", re.I), ProxySpec("YF", "^SPGSCI", "S&P GSCI Index")),
+    (re.compile(r"nasdaq.*100", re.I), ProxySpec("YF", "^NDX", "NASDAQ‑100")),
+    (re.compile(r"s&p.*500|sp\s*500", re.I), ProxySpec("YF", "^GSPC", "S&P 500")),
+    (re.compile(r"7\-10|intermediate.*treasury|중기국채", re.I), ProxySpec("YF", "IEF", "U.S. Treasury 7‑10y")),
+    (re.compile(r"tips|물가연동", re.I), ProxySpec("YF", "TIP", "U.S. TIPS (ETF)")),
+    (re.compile(r"reit|리츠", re.I), ProxySpec("YF", "VNQ", "U.S. REITs (ETF)")),
+]
+
+@st.cache_data(show_spinner=False)
+def audit_and_autofix_proxies(etfs: List[str], base_map: Dict[str, ProxySpec]) -> Tuple[pd.DataFrame, Dict[str, ProxySpec]]:
+    pmap = dict(base_map)
+    rows = []
+    for t in etfs:
+        key = t.upper().strip()
+        if key in pmap:
+            rows.append({"티커": key, "상태": "OK", "제안": f"{pmap[key].source}:{pmap[key].series}"})
+            continue
+        info = yf_info(key)
+        text = " ".join([str(v) for v in info.values() if v]).lower()
+        suggestion = None
+        for pat, spec in _RULES:
+            if pat.search(text) or pat.search(key):
+                suggestion = spec
+                break
+        if suggestion is not None:
+            pmap[key] = suggestion
+            rows.append({"티커": key, "상태": "AUTO_MAPPED", "제안": f"{suggestion.source}:{suggestion.series}"})
+        else:
+            rows.append({"티커": key, "상태": "NEEDS_MANUAL", "제안": "(없음)"})
+    return pd.DataFrame(rows), pmap
+
+# Resolve a proxy ticker to load with Yahoo
+def resolve_proxy_ticker(ticker: str, proxy_map: Dict[str, ProxySpec]) -> str:
+    t = ticker.upper().strip()
+    spec = proxy_map.get(t)
+    if spec:
+        return spec.series
+    # fallbacks
+    if t in {"IAU", "GLD"}: return "GLD"
+    if t in {"BCI", "DBC"}: return "^SPGSCI"
+    return ""
+
+# Hybrid builder (ETF + Proxy splice)
+def build_hybrid_series_from_proxy(etf_ticker: str, proxy_ticker: str, start: str = "1970-01-01") -> pd.Series:
+    if not proxy_ticker:
+        # Only ETF
+        s_etf = yf_download(etf_ticker, start=start)
+        s_etf.name = f"HYBRID_{etf_ticker}"
+        return s_etf
+    s_etf = yf_download(etf_ticker, start=start)
+    s_proxy = yf_download(proxy_ticker, start=start)
+    if s_etf.empty and s_proxy.empty:
+        return pd.Series(dtype=float, name=f"HYBRID_{etf_ticker}")
+    # business‑day index
+    idx = pd.date_range(
+        start=min([x.index.min() for x in [s_etf, s_proxy] if not x.empty]),
+        end=max([x.index.max() for x in [s_etf, s_proxy] if not x.empty]),
+        freq="B",
+    )
+    e = s_etf.reindex(idx).ffill()
+    p = s_proxy.reindex(idx).ffill()
+    # scale proxy to ETF over overlap
+    overlap = pd.concat([e, p], axis=1).dropna()
+    if overlap.empty:
+        scaled_p = p
+    else:
+        x = overlap.iloc[:, 1].values
+        y = overlap.iloc[:, 0].values
+        a = float((x @ y) / (x @ x)) if np.isfinite((x @ y) / (x @ x)) else 1.0
+        scaled_p = p * a
+    # splice
+    cutoff = e.first_valid_index()
+    hybrid = scaled_p.copy()
+    if cutoff is not None:
+        hybrid.loc[cutoff:] = e.loc[cutoff:]
+    hybrid.name = f"HYBRID_{etf_ticker}"
+    return hybrid.dropna()
+
+# Simple metrics
+def to_monthly(s: pd.Series) -> pd.Series:
+    return s.resample("M").last()
+
+def perf_metrics(series: pd.Series) -> dict:
+    if series.empty:
+        return {"CAGR": np.nan, "Vol": np.nan, "MDD": np.nan}
+    idx = series / series.iloc[0] * 100.0
+    m = to_monthly(idx)
+    rets = m.pct_change().dropna()
+    # CAGR
+    years = (m.index[-1] - m.index[0]).days / 365.25
+    cagr = (m.iloc[-1] / m.iloc[0]) ** (1/years) - 1 if years > 0 else np.nan
+    # Vol (annualized)
+    vol = rets.std() * math.sqrt(12)
+    # MDD
+    roll_max = idx.cummax()
+    dd = idx / roll_max - 1
+    mdd = dd.min()
+    return {"CAGR": cagr, "Vol": vol, "MDD": mdd}
+
+# =============================
+# UI — Intro & Presets
+# =============================
+st.title("ETF 백필 포트폴리오 비주얼라이저")
+st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다. (기간: 자동 최대)")
+
+st.markdown("---")
+left, right = st.columns([1.2, 1])
+with left:
+    st.subheader("🧭 처음 오셨나요?")
+    st.write(
+        """
+        이 웹앱은 **ETF 상장 이전 구간까지** 지수/프록시를 활용해 **하이브리드 시리즈**를 만들고,
+        포트폴리오 성과를 쉽게 비교할 수 있도록 돕습니다.
+        
+        - **분산투자**: 서로 다른 자산을 섞어 위험을 낮추고 안정적 성과를 추구
+        - **하이브리드 백필**: 상장 이전은 프록시 지수, 상장 이후는 실제 ETF로 이어 붙이기
+        - **리밸런싱**: 정기적으로 비중 복원(선택 사항)
+        """
+    )
+with right:
+    st.info("Tip: 좌측 사이드바에서 티커와 비중을 입력하고 '백테스트 실행'을 눌러보세요.")
+
+st.markdown("---")
+
+# Representative portfolios with description
+PRESETS = {
     "60:40 포트폴리오": {
-        "desc": "성장(주식)과 안정(채권)을 단순하게 결합한 기본형. 시장 평균에 가까운 성과를 목표로 합니다.",
-        "why": [
-            "주식의 장기 성장 + 채권의 완충 효과로 변동성을 낮춤",
-            "리밸런싱(정기 비중 복원)으로 위험 관리가 쉬움",
-            "초보자도 이해하기 쉬운 구조"
-        ],
+        "desc": "성장(주식)+안정(채권)의 기본형",
         "composition": [
             {"티커": "SPY", "자산": "미국 주식", "비중(%)": 60},
             {"티커": "BND", "자산": "미국 종합채권", "비중(%)": 40},
         ],
     },
     "올웨더 포트폴리오": {
-        "desc": "경제의 네 가지 국면(성장/침체/인플레/디플레)에서 모두 버티도록 설계된 레이 달리오식 자산 배분.",
-        "why": [
-            "장·중기 국채 비중으로 경기 둔화·디플레 리스크 대응",
-            "금·원자재로 인플레이션 환경 방어",
-            "주식 비중은 낮추되 전체 포트 변동성 균형 지향"
-        ],
+        "desc": "레이 달리오식 리스크 균형",
         "composition": [
             {"티커": "VTI",  "자산": "미국 주식",       "비중(%)": 30},
             {"티커": "VGLT", "자산": "미국 장기국채",   "비중(%)": 40},
@@ -69,12 +254,7 @@ PRESETS_WITH_DESC = {
         ],
     },
     "GAA 포트폴리오": {
-        "desc": "멥 페이버 계열의 글로벌 자산 배분 예시. 주식·채권·리츠·원자재·금·현금 등 광범위한 분산.",
-        "why": [
-            "전 세계 자산군으로 폭넓게 분산",
-            "리츠·원자재·금 포함으로 실물·인플레 헷지 강화",
-            "현금/단기채 비중으로 유동성도 확보"
-        ],
+        "desc": "글로벌 광범위 분산",
         "composition": [
             {"티커": "VTI", "자산": "미국 주식",          "비중(%)": 10},
             {"티커": "VEA", "자산": "선진국(미국 제외) 주식", "비중(%)": 10},
@@ -89,564 +269,175 @@ PRESETS_WITH_DESC = {
     },
 }
 
-# (선택) 임시 성과값 – 실제 백테스트 결과와 연결해 교체하세요
-METRICS = {
-    "60:40 포트폴리오": {"연평균 수익률": "7.2%", "변동성": "9.5%", "최대 낙폭": "-25%"},
-    "올웨더 포트폴리오": {"연평균 수익률": "6.8%", "변동성": "6.0%", "최대 낙폭": "-15%"},
-    "GAA 포트폴리오": {"연평균 수익률": "7.5%", "변동성": "8.0%", "최대 낙폭": "-20%"},
-}
+st.subheader("🚀 대표 포트폴리오 비교 & 빠른 불러오기")
+for i, (name, spec) in enumerate(PRESETS.items()):
+    st.markdown(f"#### 📊 {name}")
+    st.caption(spec.get("desc", ""))
+    dfc = pd.DataFrame(spec["composition"])
+    c1, c2 = st.columns([1.2, 1])
+    with c1:
+        st.dataframe(dfc, hide_index=True, use_container_width=True)
+        if st.button(f"이 구성 불러오기", key=f"load_{i}"):
+            st.session_state["preset_portfolio"] = {
+                "assets": dfc["티커"].tolist(),
+                "labels": dfc["자산"].tolist(),
+                "weights": [float(x) for x in dfc["비중(%)"].tolist()],
+            }
+            st.success(f"'{name}' 구성을 불러왔습니다. 좌측 사이드바에서 확인하세요.")
+    with c2:
+        sizes = dfc["비중(%)"].astype(float).tolist()
+        labels = (dfc["자산"] + " (" + dfc["비중(%)"].astype(str) + "%)").tolist()
+        fig, ax = plt.subplots()
+        ax.pie(sizes, labels=labels, autopct='%1.0f%%', startangle=90)
+        ax.axis('equal')
+        st.pyplot(fig)
+    st.markdown("---")
 
-# 2) 렌더 함수: 설명 + 표 + 파이차트 + 성과
-
-def render_rep_portfolios_with_desc():
-    st.markdown("### 🚀 대표 포트폴리오 비교")
-    for name, spec in PRESETS_WITH_DESC.items():
-        st.markdown(f"#### 📊 {name}")
-        st.caption(spec["desc"])  # <-- 설명 한 줄
-
-        # (선택) 왜 이런 비율인가? 자세한 설명은 접었다 펴는 형식
-        with st.expander("📘 왜 이런 비율인가?", expanded=False):
-            for bullet in spec.get("why", []):
-                st.markdown(f"- {bullet}")
-
-        # 레이아웃: 좌(구성표/성과), 우(파이그래프)
-        left, right = st.columns([1.2, 1])
-        df = pd.DataFrame(spec["composition"])  # 티커/자산/비중
-
-        with left:
-            st.dataframe(df, hide_index=True, use_container_width=True)
-            m = METRICS.get(name)
-            if m:
-                st.write(
-                    f"- **연평균 수익률:** {m['연평균 수익률']}  \n"
-                    f"- **변동성:** {m['변동성']}  \n"
-                    f"- **최대 낙폭:** {m['최대 낙폭']}"
-                )
-
-        with right:
-            _pie(df)
-
-        st.markdown("---")
-
-
-def _pie(df: pd.DataFrame):
-    sizes = df["비중(%)"].astype(float).tolist()
-    labels = (df["자산"] + " (" + df["비중(%)"].astype(str) + "%)").tolist()
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.0f%%', startangle=90)
-    ax.axis('equal')
-    st.pyplot(fig)
-
-# 3) 사용 방법 (한 줄): 원하는 위치에서 아래 함수를 호출하세요.
-# render_rep_portfolios_with_desc()
-
-# --- 한국어 폰트 설정 (matplotlib 한글 깨짐 방지) ---
-try:
-    from matplotlib import font_manager, rcParams
-
-    def _set_korean_font():
-        candidates = [
-            "AppleGothic", "Malgun Gothic", "NanumGothic", "Nanum Gothic",
-            "Noto Sans CJK KR", "Noto Sans KR"
-        ]
-        installed = {f.name for f in font_manager.fontManager.ttflist}
-        for name in candidates:
-            if name in installed:
-                rcParams["font.family"] = name
-                rcParams["axes.unicode_minus"] = False
-                return name
-        rcParams["axes.unicode_minus"] = False
-        return None
-
-    _set_korean_font()
-except Exception as e:
-    print(f"[Warning] Korean font setup skipped: {e}")
-    pass
-
-st.set_page_config(page_title="ETF 백테스트 확장 분석기", layout="wide")
-
-# ------------------------------ Helper functions ------------------------------
-@st.cache_data(show_spinner=False)
-def fetch_prices_yf(symbol: str, start: str, end: str) -> pd.Series:
-    """Fetch Close (auto_adjusted) from Yahoo Finance (daily)."""
-    data = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
-    if data.empty:
-        return pd.Series(dtype=float)
-    s = data["Close"].copy()
-    s.name = symbol
-    return s
-
-
-@st.cache_data(show_spinner=False)
-def build_synthetic_from_proxy(etf: str, proxy: str, start: str, end: str) -> pd.Series:
-    """Extend ETF price history using proxy returns before inception."""
-    etf_px = fetch_prices_yf(etf, start, end)
-    proxy_px = fetch_prices_yf(proxy, start, end)
-
-    if etf_px.empty and proxy_px.empty:
-        return pd.Series(dtype=float)
-    if not etf_px.empty and etf_px.index.min() <= pd.to_datetime(start):
-        return etf_px
-
-    overlap_start = max(etf_px.index.min() if not etf_px.empty else pd.Timestamp.max,
-                        proxy_px.index.min() if not proxy_px.empty else pd.Timestamp.max)
-    overlap_end = min(etf_px.index.max() if not etf_px.empty else pd.Timestamp.min,
-                      proxy_px.index.max() if not proxy_px.empty else pd.Timestamp.min)
-    have_overlap = (overlap_start <= overlap_end)
-
-    if not have_overlap:
-        if proxy_px.empty:
-            return etf_px
-        scaled = proxy_px / proxy_px.iloc[0] * 100.0
-        scaled.name = etf
-        return scaled
-
-    etf_overlap = etf_px.loc[overlap_start:overlap_end]
-    anchor_date = etf_overlap.index.min()
-    anchor_price = float(etf_overlap.iloc[0])
-    pre_proxy = proxy_px.loc[: anchor_date].iloc[:-1]
-    if pre_proxy.empty:
-        return etf_px
-
-    proxy_ret = pre_proxy.pct_change().fillna(0.0)
-    synth = pd.Series(index=pre_proxy.index.append(pd.Index([anchor_date])), dtype=float)
-    synth.iloc[-1] = anchor_price
-    for i in range(len(pre_proxy) - 1, -1, -1):
-        r = float(proxy_ret.iloc[i])
-        synth.iloc[i] = synth.iloc[i + 1] / (1.0 + r) if (1.0 + r) != 0 else synth.iloc[i + 1]
-
-    out = pd.concat([synth.iloc[:-1], etf_px.loc[anchor_date:]])
-    out.name = etf
-    return out
-
-
-def flexible_rebalance(portfolio_df: pd.DataFrame, weights: dict, freq: str = "Monthly") -> pd.Series:
-    """Adjustable rebalancing: Monthly / Quarterly / Yearly"""
-    prices = portfolio_df.dropna(how="all").fillna(method="ffill").dropna()
-    rets = prices.pct_change().dropna()
-
-    if freq == "Monthly":
-        rebalance_dates = rets.resample("M").last().index
-    elif freq == "Quarterly":
-        rebalance_dates = rets.resample("Q").last().index
-    elif freq == "Yearly":
-        rebalance_dates = rets.resample("Y").last().index
-    else:
-        rebalance_dates = rets.resample("M").last().index
-
-    tickers = list(weights.keys())
-    w = pd.Series(weights)
-    pv = pd.Series(index=rets.index, dtype=float)
-    value = 100.0
-    current_weights = w.copy()
-    last_reb_date = None
-
-    for dt, row in rets.iterrows():
-        if (dt in rebalance_dates) or (last_reb_date is None):
-            current_weights = w.copy()
-            last_reb_date = dt
-        day_ret = (row[tickers] * current_weights[tickers]).sum()
-        value *= (1.0 + day_ret)
-        pv.loc[dt] = value
-    return pv
-
-
-def perf_stats(series: pd.Series) -> dict:
-    s = series.dropna()
-    if s.empty:
-        return {}
-    rets = s.pct_change().dropna()
-    if rets.empty:
-        return {}
-    n_days = (s.index[-1] - s.index[0]).days
-    years = n_days / 365.25 if n_days > 0 else 0
-    cagr = (s.iloc[-1] / s.iloc[0]) ** (1 / years) - 1 if years > 0 else np.nan
-    vol = rets.std() * math.sqrt(252)
-    sharpe = (rets.mean() * 252) / (rets.std() if rets.std() != 0 else np.nan)
-    mdd = (s / s.cummax() - 1).min()
-    return {"CAGR": cagr, "Volatility": vol, "Sharpe (rf=0)": sharpe,
-            "Max Drawdown": mdd, "Start": s.index[0].date(),
-            "End": s.index[-1].date(), "Length (yrs)": (n_days / 365.25)}
-
-
-def fmt_pct(x):
-    return "-" if (x is None or (isinstance(x, float) and np.isnan(x))) else f"{x*100:,.2f}%"
-
-
-# ------------------------------ UI ------------------------------
-st.title("📈 ETF 백테스트 확장 분석기")
-import streamlit as st
-import matplotlib.pyplot as plt
-
-# --- 사용 가이드 ---
-st.markdown("---")
-st.markdown("### 🧭 환영합니다!")
-st.write("""
-이 웹앱은 **ETF 상장 이전 기간**까지도 추종지수를 이용해 백테스트할 수 있어, 
-과거부터 지금까지의 장기 성과를 살펴볼 수 있습니다.
-
-처음 오신 분들도 쉽게 이해할 수 있도록, 포트폴리오의 기본 원리와 대표 예시를 함께 제공합니다.
-""")
-
-
-# --- 기존 문구 대신 친절한 인트로 ---
-st.markdown("---")
-st.markdown("### 🧩 사용 방법")
-st.write("""
-1️⃣ 분석하고 싶은 ETF를 선택합니다.  
-2️⃣ 각 자산의 비중을 입력합니다.  
-3️⃣ 기간을 설정하면 → 자동으로 **상장 전 추종지수 포함 백테스트 결과**를 볼 수 있습니다!
-""")
-
-# --- 포트폴리오 이론 요약 ---
-st.markdown("---")
-st.markdown("### 💡 포트폴리오란?")
-st.write("""
-**포트폴리오**는 여러 자산(예: 주식, 채권, 금 등)에 분산 투자하여 
-한쪽 자산의 손실을 다른 자산의 수익으로 상쇄하도록 설계된 투자 조합입니다.
-""")
-
-# --- 대표 포트폴리오 비교 ---
-st.markdown("---")
-
-render_rep_portfolios_with_desc()
-
-
-
-# ── 1) 포트폴리오 구성 (항상 '합계' 포함 단일 표) + 자동 추종지수 & 프록시 매핑 ─────────
+# =============================
+# Sidebar — Portfolio Editor
+# =============================
 st.sidebar.header("1) 포트폴리오 구성")
 
-# ── 간단 티커 → 추종지수/프록시 매핑 테이블 (필요 시 계속 보강) ──
-_AUTO_MAP = {
-    "QQQ":  {"Index": "NASDAQ-100", "Provider": "Nasdaq", "ProxyTicker": "^NDX", "Notes": ""},
-    "IEF":  {"Index": "ICE U.S. Treasury 7–10 Year", "Provider": "ICE", "ProxyTicker": "", "Notes": ""},
-    "TIP":  {"Index": "Bloomberg U.S. TIPS", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
-    "VCLT": {"Index": "Bloomberg U.S. Long Corporate", "Provider": "Bloomberg", "ProxyTicker": "", "Notes": ""},
-    "EMLC": {"Index": "JPM GBI-EM GD (LC)", "Provider": "JPMorgan", "ProxyTicker": "", "Notes": ""},
-    "GDX":  {"Index": "NYSE Arca Gold Miners", "Provider": "NYSE Arca", "ProxyTicker": "", "Notes": ""},
-    "MOO":  {"Index": "MVIS Global Agribusiness", "Provider": "MV Index", "ProxyTicker": "", "Notes": ""},
-    "XLB":  {"Index": "S&P Materials Select Sector", "Provider": "S&P DJI", "ProxyTicker": "", "Notes": ""},
-    "VDE":  {"Index": "MSCI US IMI Energy 25/50", "Provider": "MSCI", "ProxyTicker": "", "Notes": ""},
-    # "SPY": {"Index": "S&P 500", "Provider": "S&P DJI", "ProxyTicker": "^GSPC", "Notes": ""},
-}
+def _empty_rows(n=4):
+    return pd.DataFrame({"티커": ["" for _ in range(n)], "비율 (%)": [0.0 for _ in range(n)]})
 
-
-def _fallback_proxy_for_fred(series_code: str, etf: str) -> str:
-    etf_u = (etf or "").upper()
-    s = (series_code or "").upper()
-    # 금
-    if "GOLD" in s or etf_u in {"IAU", "GLD"}:
-        return "GLD" # 또는 "XAUUSD=X"
-    # 원자재/상품지수
-    if "GSCI" in s or "BCOM" in s or etf_u in {"BCI", "DBC"}:
-        return "^SPGSCI" # 또는 "DBC"
-    # 기본: 빈 문자열 (미정)
-    return ""
-    
-
-
-
-def _resolve_proxy_ticker(etf: str, updated_map: dict) -> str:
-    # 1) etf_audit 자동 매핑 우선
-    spec = updated_map.get(etf)
-    if spec:
-        src = (getattr(spec, "source", None) or spec.get("source") or "").upper()
-        series = getattr(spec, "series", None) or spec.get("series") or ""
-        if src == "YF":
-            return series
-        elif src == "FRED":
-            return _fallback_proxy_for_fred(series, etf)
-    # 2) 로컬 _AUTO_MAP
-    meta = _AUTO_MAP.get(etf)
-    if meta and meta.get("ProxyTicker"):
-        return str(meta["ProxyTicker"]).upper()
-    # 3) 키워드 규칙 (이름만으로 유추)
-    t = etf.upper()
-    if t in {"IAU", "GLD"}: return "GLD"
-    if t in {"BCI", "DBC"}: return "^SPGSCI"
-    return ""
-
-def _auto_index_meta(ticker: str) -> dict:
-    t = (ticker or "").strip().upper()
-    return _AUTO_MAP.get(t, {"Index": "알 수 없음", "Provider": "", "ProxyTicker": "", "Notes": ""})
-
-def _auto_index_label(ticker: str) -> str:
-    meta = _auto_index_meta(ticker)
-    base = meta.get("Index", "")
-    provider = meta.get("Provider", "")
-    proxy = meta.get("ProxyTicker", "")
-    label = f"{base} ({provider})" if base else "알 수 없음"
-    if proxy:
-        label += f" / proxy: {proxy}"
-    return label or "알 수 없음"
-
-# ── 기본 포트폴리오 ──
-default_port = pd.DataFrame({
-    "티커": ["QQQ", "IEF", "TIP", "VCLT", "EMLC", "IAU", "BCI"],
-    "비율 (%)": [35.0, 20.0, 10.0, 10.0, 10.0, 7.5, 7.5],
-})
-
-# 세션 초기화
 if "portfolio_rows" not in st.session_state:
-    st.session_state["portfolio_rows"] = default_port
+    if "preset_portfolio" in st.session_state:
+        p = st.session_state["preset_portfolio"]
+        st.session_state["portfolio_rows"] = pd.DataFrame({
+            "티커": p.get("assets", []),
+            "비율 (%)": p.get("weights", []),
+        })
+    else:
+        st.session_state["portfolio_rows"] = _empty_rows()
+
+# Ensure a few empty rows for user convenience
+base_df = st.session_state["portfolio_rows"]
+if len(base_df) < 6:
+    base_df = pd.concat([base_df, _empty_rows(6 - len(base_df))], ignore_index=True)
+
+# Build auto mapping table from current tickers
+def build_proxy_table_with_autofix(df_in: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, ProxySpec]]:
+    tickers = [t for t in df_in["티커"].astype(str).str.upper().str.strip().tolist() if t]
+    report, pmap = audit_and_autofix_proxies(tickers, BASE_PROXY_MAP)
+    rows = []
+    for t in tickers:
+        spec = pmap.get(t)
+        label = "알 수 없음"
+        proxy = ""
+        if spec:
+            proxy = spec.series
+            label = f"{spec.name} / proxy: {proxy}"
+        elif t in {"IAU", "GLD"}:
+            proxy = "GLD"; label = f"Gold proxy via GLD / proxy: {proxy}"
+        elif t in {"BCI", "DBC"}:
+            proxy = "^SPGSCI"; label = f"S&P GSCI Index / proxy: {proxy}"
+        rows.append({"ETF": t, "Label": label, "Proxy": proxy})
+    return pd.DataFrame(rows), pmap
+
+proxy_table, proxy_map = build_proxy_table_with_autofix(base_df)
 
 def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
-    base = df.copy()
-    base["티커"] = base["티커"].astype(str).str.upper().str.strip()
-    base["비율 (%)"] = pd.to_numeric(base["비율 (%)"], errors="coerce").fillna(0.0)
-    total = float(base["비율 (%)"].sum())
-    total_row = pd.DataFrame({"티커": ["합계"], "비율 (%)": [total]})
-    return pd.concat([base, total_row], ignore_index=True)
+    d = df.copy()
+    total = float(pd.to_numeric(d["비율 (%)"], errors="coerce").fillna(0).sum())
+    d = pd.concat([d, pd.DataFrame({"티커": ["합계"], "비율 (%)": [total]})], ignore_index=True)
+    return d
 
-def attach_auto_index_label(df_in: pd.DataFrame, proxy_table: pd.DataFrame) -> pd.DataFrame:
-    label_map = {row.ETF: row.Label for _, row in proxy_table.iterrows()}
-    out = df_in.copy()
-    def _lab(x):
-        t = str(x).strip().upper()
-        if t == "합계":
-            return "—"
-        return label_map.get(t, "알 수 없음")
-    out["추종지수(자동)"] = out["티커"].apply(_lab)
-    return out
-# 편집 가능한 단일 표(합계 포함 / 3열 자동)
-_editor_df = _append_total_row(st.session_state["portfolio_rows"])
-_editor_df = _attach_auto_index(_editor_df)
+editor_df = _append_total_row(base_df)
+
+label_map = {r.ETF: r.Label for _, r in proxy_table.iterrows()}
+
+def _label_for(t):
+    t = str(t).upper().strip()
+    if t == "합계": return "—"
+    return label_map.get(t, "알 수 없음")
+
+editor_df["추종지수(자동)"] = editor_df["티커"].apply(_label_for)
 
 edited_df_out = st.sidebar.data_editor(
-    _editor_df,
+    editor_df,
     num_rows="dynamic",
     use_container_width=True,
     key="portfolio_editor",
     column_config={
-        "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, TIP", max_chars=15),
-        "비율 (%)": st.column_config.NumberColumn(
-            "비율 (%)", help="0~100 사이의 비율(%)", min_value=0.0, max_value=100.0, step=0.1, format="%.1f %%"
-        ),
-        "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="티커 기반 자동 매핑", disabled=True),
+        "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, IAU, BCI"),
+        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
+        "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="자동 매핑 라벨", disabled=True),
     },
-    disabled=["추종지수(자동)"],  # 3열은 읽기 전용
+    disabled=["추종지수(자동)"],
 )
 
-def _sanitize_user_edit(df_with_total_and_auto: pd.DataFrame) -> pd.DataFrame:
-    df = df_with_total_and_auto.copy()
-    # 계산 컬럼 제거
-    if "추종지수(자동)" in df.columns:
-        df = df.drop(columns=["추종지수(자동)"])
-    # '합계' 행 제거
-    df = df[df["티커"].astype(str).str.strip().str.upper() != "합계"]
-    # 공백/0 정리
-    df["티커"] = df["티커"].astype(str).str.upper().str.strip()
-    df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0)
-    df = df[df["티커"].str.len() > 0]
-    return df
+# Save back (drop total row)
+st.session_state["portfolio_rows"] = edited_df_out.iloc[:-1][["티커", "비율 (%)"]]
 
-# 세션 반영
-st.session_state["portfolio_rows"] = _sanitize_user_edit(edited_df_out)
+st.sidebar.header("2) 기간 설정")
+colA, colB = st.sidebar.columns(2)
+with colA:
+    start_date = st.date_input("시작일", value=date(1990,1,1))
+with colB:
+    end_date = st.date_input("종료일", value=date.today())
 
-# 합계 경고(표 아래 한 줄)
-_current_total = float(st.session_state["portfolio_rows"]["비율 (%)"].sum())
-if abs(_current_total - 100.0) < 1e-6:
-    st.sidebar.caption(f"✅ 합계: **{_current_total:.1f}%**")
-elif _current_total < 100.0:
-    st.sidebar.caption(f":red[⚠ 합계 {_current_total:.1f}% — 100% 미만]")
-else:
-    st.sidebar.caption(f":red[⚠ 합계 {_current_total:.1f}% — 100% 초과]")
+run_bt = st.sidebar.button("백테스트 실행", type="primary")
 
-# 자동 보정 버튼
-def _normalize_weights():
-    df = st.session_state["portfolio_rows"].copy()
-    s = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0).sum()
-    if s > 0:
-        df["비율 (%)"] = pd.to_numeric(df["비율 (%)"], errors="coerce").fillna(0.0) * (100.0 / s)
-        st.session_state["portfolio_rows"] = df
+# =============================
+# Backtest Execution
+# =============================
+main_tab1, main_tab2 = st.tabs(["📈 결과", "🧪 매핑 리포트"])
 
-st.sidebar.button("합계 100%로 자동 보정", on_click=_normalize_weights)
-
-# ── 수동 매핑 없이 proxy_df/mapping 자동 생성 ──
-def build_proxy_table_with_autofix(portfolio_df: pd.DataFrame, updated_map: dict) -> tuple[pd.DataFrame, dict]:
-    tickers = (
-        portfolio_df["티커"].astype(str).str.upper().str.strip()
-    )
-    tickers = [t for t in tickers.unique() if t and t != "합계"]
-
-    rows, mapping = [], {}
-    for t in tickers:
-        meta = _AUTO_MAP.get(t, {"Index": "", "Provider": "", "ProxyTicker": "", "Notes": ""})
-        proxy = _resolve_proxy_ticker(t, updated_map)
-        mapping[t] = proxy
-        label = f"{meta.get('Index','알 수 없음')} ({meta.get('Provider','')})".strip()
-        if proxy:
-            label = (label if label and label != "( )" else "자동 유추") + f" / proxy: {proxy}"
-        rows.append({
-            "ETF": t,
-            "Index": meta.get("Index", "알 수 없음") or "알 수 없음",
-            "Provider": meta.get("Provider", ""),
-            "Proxy": proxy,
-            "Notes": meta.get("Notes", ""),
-            "Label": label,
-        })
-
-    df = pd.DataFrame(rows, columns=["ETF", "Index", "Provider", "Proxy", "Notes", "Label"])
-    return df, mapping
-# 항상 proxy_df와 mapping이 존재하도록 생성
-proxy_df = _build_auto_proxy_df(st.session_state["portfolio_rows"])
-mapping = {
-    str(row.get("ETF", "")).upper(): str(row.get("Proxy", "")).upper()
-    for _, row in proxy_df.iterrows() if str(row.get("ETF", "")).strip()
-}
-
-# ── 2) 옵션 ─────────────────────────────────────────────────────
-st.sidebar.header("2) 옵션")
-rebalance = st.sidebar.selectbox(
-    "리밸런싱 주기", ["Monthly", "Quarterly", "Yearly"], index=0,
-    help="포트폴리오를 재조정할 주기를 선택하세요."
-)
-log_scale = st.sidebar.checkbox("로그 스케일 차트", value=True)
-
-# ── 3) 실행 ─────────────────────────────────────────────────────
-st.sidebar.header("3) 실행")
-run = st.sidebar.button("백테스트 실행", type="primary")
-
-# ------------------------------ 실행 ------------------------------
-if run:
-    pf = st.session_state["portfolio_rows"].copy()
-    pf["티커"] = pf["티커"].astype(str).str.upper().str.strip()
-    pf["비율 (%)"] = pd.to_numeric(pf["비율 (%)"], errors="coerce").fillna(0.0)
-    pf = pf[(pf["티커"].str.len() > 0) & (pf["비율 (%)"] > 0)]
-
-    total_pct_now = float(pf["비율 (%)"].sum())
-    if total_pct_now <= 0:
-        st.error("비율 합은 0보다 커야 합니다.")
-        st.stop()
-    if abs(total_pct_now - 100.0) > 1e-6:
-        st.error(f"포트폴리오 비율 총합이 {total_pct_now:.1f}% 입니다. 합계가 정확히 100%가 되도록 조정하세요.")
-        st.info("TIP: 사이드바의 ‘합계 100%로 자동 보정’ 버튼을 눌러 즉시 맞출 수 있습니다.")
-        st.stop()
-
-    # 가중치 dict (0~1)
-    weights = {row["티커"]: row["비율 (%)"] / 100.0 for _, row in pf.iterrows()}
-
-    # ▶ 기간 자동: 가능한 최장 기간
-    start = "1900-01-01"
-    end = pd.to_datetime(date.today()).strftime("%Y-%m-%d")
-
-    tabs = st.tabs(["포트폴리오", "구성종목", "설정 및 참고"])
-    all_prices, notes = {}, []
-
-    for t in weights.keys():
-        etf_px = fetch_prices_yf(t, start, end)
-        proxy = mapping.get(t)
-        if proxy:
-            synth = build_synthetic_from_proxy(t, proxy, start, end)
-            if synth.empty:
-                notes.append(f"{t}: 데이터 없음 ({proxy} 불러오기 실패)")
-            else:
-                all_prices[t] = synth
-                notes.append(f"{t}: {proxy} 지수로 연장 ({synth.index.min().date()}까지)")
+if run_bt:
+    with st.spinner("데이터 로딩 및 백테스트 중..."):
+        dfp = st.session_state["portfolio_rows"].copy()
+        # Clean rows
+        dfp["티커"] = dfp["티커"].astype(str).str.upper().str.strip()
+        dfp["비율 (%)"] = pd.to_numeric(dfp["비율 (%)"], errors="coerce").fillna(0.0)
+        dfp = dfp[dfp["티커"] != ""]
+        dfp = dfp[dfp["비율 (%)"] > 0]
+        if dfp.empty:
+            st.error("포트폴리오가 비어있습니다. 티커와 비중을 입력해주세요.")
         else:
-            if etf_px.empty:
-                notes.append(f"{t}: 데이터 없음")
+            weights = dfp["비율 (%)"].values
+            if weights.sum() == 0:
+                st.error("비중 합계가 0입니다. 비중을 입력해주세요.")
             else:
-                all_prices[t] = etf_px
-                notes.append(f"{t}: ETF 데이터만 사용")
+                weights = weights / weights.sum()
+                # Build each hybrid series
+                series_map = {}
+                for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
+                    proxy_sym = resolve_proxy_ticker(t, proxy_map)
+                    hy = build_hybrid_series_from_proxy(t, proxy_sym, start=start_date.isoformat())
+                    series_map[t] = hy
+                # Align & combine
+                all_idx = None
+                for s in series_map.values():
+                    if all_idx is None:
+                        all_idx = s.index
+                    else:
+                        all_idx = all_idx.union(s.index)
+                all_idx = pd.DatetimeIndex(sorted(all_idx))
+                rets = []
+                for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
+                    s = series_map[t].reindex(all_idx).ffill()
+                    s = s / s.iloc[0] * 100.0
+                    rets.append(s * w)
+                port = pd.concat(rets, axis=1).sum(axis=1).dropna()
+                port = port.loc[(port.index >= pd.to_datetime(start_date)) & (port.index <= pd.to_datetime(end_date))]
+                # Plot
+                with main_tab1:
+                    st.subheader("포트폴리오 지수 (=100 기준)")
+                    st.line_chart(port)
+                    m = perf_metrics(port)
+                    st.markdown(
+                        f"**CAGR:** {m['CAGR']*100:,.2f}%  |  **변동성:** {m['Vol']*100:,.2f}%  |  **최대낙폭:** {m['MDD']*100:,.2f}%"
+                    )
 
-    if not all_prices:
-        st.error("유효한 데이터가 없습니다. 티커나 프록시를 확인하세요.")
-        st.stop()
+    with main_tab2:
+        rep, _ = audit_and_autofix_proxies(dfp["티커"].tolist(), BASE_PROXY_MAP)
+        st.dataframe(rep, use_container_width=True)
+else:
+    with main_tab1:
+        st.info("좌측 사이드바에서 포트폴리오를 입력하고 '백테스트 실행'을 눌러 결과를 확인하세요.")
+    with main_tab2:
+        st.dataframe(proxy_table, use_container_width=True)
 
-    price_df = pd.concat(all_prices.values(), axis=1).sort_index().ffill().dropna()
-    pv = flexible_rebalance(price_df, weights, freq=rebalance)
-    idx = pv / pv.iloc[0] * 100.0
-
-    with tabs[0]:
-        st.subheader("📊 포트폴리오 지수 추이")
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(idx.index, idx.values, label="Portfolio (base=100)")
-        ax.set_ylabel("지수 (기준=100)")
-        if log_scale:
-            ax.set_yscale("log")
-        ax.grid(True, linestyle="--", alpha=0.4)
-        ax.legend()
-        st.pyplot(fig)
-
-        st.subheader("📉 드로우다운(누적 손실률)")
-        rolling_max = idx.cummax()
-        dd = idx / rolling_max - 1
-        fig2, ax2 = plt.subplots(figsize=(10, 3))
-        ax2.fill_between(dd.index, dd.values, 0.0)
-        ax2.set_ylabel("손실률")
-        ax2.grid(True, linestyle="--", alpha=0.4)
-        st.pyplot(fig2)
-
-        st.subheader("📈 성과 지표")
-        stats = perf_stats(idx)
-        stats_tbl = pd.DataFrame({
-            "Value": [
-                fmt_pct(stats.get("CAGR")),
-                fmt_pct(stats.get("Volatility")),
-                fmt_pct(stats.get("Sharpe (rf=0)")),
-                fmt_pct(stats.get("Max Drawdown")),
-                stats.get("Start"),
-                stats.get("End"),
-                f"{stats.get('Length (yrs)', 0):.1f}",
-            ]
-        }, index=["CAGR", "Volatility (연율)", "Sharpe (rf=0)", "최대손실", "시작", "종료", "기간(년)"])
-        st.dataframe(stats_tbl, use_container_width=True)
-
-    with tabs[1]:
-        st.subheader("📊 개별 ETF 가격 추이 (기준=100)")
-        base = price_df / price_df.iloc[0] * 100.0
-        fig3, ax3 = plt.subplots(figsize=(10, 5))
-        for c in base.columns:
-            ax3.plot(base.index, base[c].values, label=c)
-        ax3.set_ylabel("지수 (기준=100)")
-        if log_scale:
-            ax3.set_yscale("log")
-        ax3.grid(True, linestyle="--", alpha=0.4)
-        ax3.legend(ncols=3)
-        st.pyplot(fig3)
-        st.caption("라인이 일찍 끝나면 프록시 매핑을 확인하세요.")
-
-    with tabs[2]:
-        st.subheader("⚙️ 설정 및 참고")
-        st.markdown(
-            f"- 리밸런싱: **{rebalance}**\n"
-            "- 데이터 출처: Yahoo Finance (yfinance)\n"
-            f"- 기간: 자동 최대 (start={start}, end={end})\n"
-            "- 프록시 확장: ETF 상장 전 구간을 추종지수 수익률로 보완\n"
-            "- CSV 업로드 기능으로 직접 매핑 가능"
-        )
-        if notes:
-            st.write("**실행 노트:**")
-            for n in notes:
-                st.write("- ", n)
-
-    st.divider()
-    st.subheader("📂 데이터 다운로드")
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        price_df.to_excel(writer, sheet_name="Prices")
-        idx.to_frame("Portfolio_Index").to_excel(writer, sheet_name="Portfolio")
-    st.download_button(
-        label="엑셀 파일 다운로드",
-        data=buf.getvalue(),
-        file_name="portfolio_backfill_data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+st.markdown("---")
+st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")

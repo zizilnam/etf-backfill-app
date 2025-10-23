@@ -10,7 +10,12 @@ import yfinance as yf
 import streamlit as st
 import matplotlib.pyplot as plt
 from etf_audit import audit_and_autofix_proxies, PROXY_MAP, save_proxy_map_json
+# 사용자가 입력한 포트폴리오 티커 목록 예시
+user_tickers = ["QQQ", "IAU", "BCI", "IEF"]
 
+
+# 누락된 프록시 자동 점검 및 매핑
+report, updated_map = audit_and_autofix_proxies(user_tickers, proxy_map)
 # --- 대표 포트폴리오 비교 섹션에 '설명'을 붙이는 드롭인 스니펫 ---
 # 이 블록만 복사해서 app.py의 "대표 포트폴리오 비교" 자리에 붙여넣으면 됩니다.
 # 핵심: PRESETS 딕셔너리에서 desc/why 필드로 설명을 정의하고, 렌더러가 이를 보여줍니다.
@@ -577,6 +582,7 @@ if run:
     )
 
 st.caption("⚠️ 일부 프록시는 대체용 심볼입니다. 필요시 직접 교체하세요.")
+
 
 
 

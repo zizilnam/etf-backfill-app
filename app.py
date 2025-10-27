@@ -450,19 +450,20 @@ if run_bt:
 # =============================
 # Result-first / Intro visibility control
 # =============================
+# =============================
+# Result-first / Intro visibility control
+# =============================
 if st.session_state.backtest_started:
     # ✅ 결과를 최상단에 먼저 표시
     with main_tab1:
         render_results(st.session_state.port_series, st.session_state.port_metrics)
 
-    # 선택: 결과 하단에서만 안내 섹션 토글
-    st.toggle("초기 안내/대표 포트폴리오 보기", value=False, key="show_guides_after_run")
-    if st.session_state.get("show_guides_after_run"):
-        st.info("초기 안내/대표 포트폴리오는 백테스트 실행 후 기본적으로 숨깁니다.")
-        render_intro()
+    # ✅ 실행 후: 토글은 '대표 포트폴리오'만 표시 (초기 안내는 제외)
+    st.toggle("대표 포트폴리오 보기", value=False, key="show_presets_after_run")
+    if st.session_state.get("show_presets_after_run"):
         render_featured_portfolios()
 else:
-    # ✅ 아직 실행 전: 안내 + 대표 포트폴리오 노출
+    # ✅ 아직 실행 전: (기존 그대로) 안내 + 대표 포트폴리오 노출
     render_intro()
     render_featured_portfolios()
     with main_tab1:
@@ -472,3 +473,4 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")
+

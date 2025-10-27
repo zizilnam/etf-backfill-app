@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-# app.py — Integrated Streamlit app (result-first after backtest)
-# - Result-first UX: after "백테스트 실행", results appear at top and only '대표 포트폴리오' toggle remains
-# - Representative portfolio presets (60:40, All Weather, GAA) with one-click load (updates sidebar immediately)
-# - Sidebar editor shows "추종지수(자동)" without "알 수 없음" spam
-# - Auto audit & proxy mapping for ETFs (incl. IAU, BCI)
-# - Hybrid backfill: pre-listing period uses proxy; post-listing uses ETF
-# - Simple backtest: portfolio index, CAGR/Vol/MDD + composition pie chart
+# ETF Backfill Portfolio Visualizer — Result-first + Extended Metrics & Cash Flows
+# - Result-first UX after run
+# - Presets load → sidebar immediate update
+# - Added inputs: Initial Amount, Monthly Contribution, Dividend Reinvest (Adj Close)
+# - Added metrics: Period, Longest Underwater, Sortino, Sharpe, CAGR/Longest UW, Start/End Balance
+# - Composition pie & table
 
 from __future__ import annotations
 import os
@@ -13,7 +12,7 @@ import math
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -47,14 +46,12 @@ st.set_page_config(page_title="ETF Backfill Portfolio Visualizer", layout="wide"
 # =============================
 @dataclass
 class ProxySpec:
-    source: str   # "YF"(Yahoo) | "FRED"(not used directly in loader here)
-    series: str   # Yahoo symbol (preferred in this app)
+    source: str
+    series: str
     name: str
     transform: str = "identity"
 
-# Base proxy map — include troublesome ones (IAU/BCI) mapped to Yahoo-loadable proxies
 BASE_PROXY_MAP: Dict[str, ProxySpec] = {
-    # Stocks / Bonds examples
     "QQQ":  ProxySpec("YF", "^NDX", "NASDAQ-100 Index"),
     "SPY":  ProxySpec("YF", "^GSPC", "S&P 500 Index"),
     "VTI":  ProxySpec("YF", "VTI", "Total U.S. Stock (ETF proxy)"),
@@ -75,14 +72,13 @@ BASE_PROXY_MAP: Dict[str, ProxySpec] = {
     "BCI":  ProxySpec("YF", "^SPGSCI", "S&P GSCI Index (broad commodity)"),
 }
 
-# Lightweight yfinance helpers
 @st.cache_data(show_spinner=False)
 def yf_download(symbol: str, start: str = "1970-01-01", end: Optional[str] = None, auto_adjust: bool = True) -> pd.Series:
     import yfinance as yf
     df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=auto_adjust)
     if df.empty:
         return pd.Series(dtype=float, name=symbol)
-    col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    col = "Adj Close" if auto_adjust and "Adj Close" in df.columns else ("Close" if "Close" in df.columns else df.columns[-1])
     s = df[col].dropna()
     s.name = symbol
     return s
@@ -103,7 +99,6 @@ def yf_info(ticker: str) -> dict:
     except Exception:
         return {}
 
-# Rules to guess proxies from metadata text
 _RULES: List[Tuple[re.Pattern, ProxySpec]] = [
     (re.compile(r"gold|금", re.I), ProxySpec("YF", "GLD", "Gold proxy via GLD")),
     (re.compile(r"commodity|원자재|gsci|bcom", re.I), ProxySpec("YF", "^SPGSCI", "S&P GSCI Index")),
@@ -137,7 +132,6 @@ def audit_and_autofix_proxies(etfs: List[str], base_map: Dict[str, ProxySpec]) -
             rows.append({"티커": key, "상태": "NEEDS_MANUAL", "제안": "(없음)"})
     return pd.DataFrame(rows), pmap
 
-# Resolve a proxy ticker to load with Yahoo
 def resolve_proxy_ticker(ticker: str, proxy_map: Dict[str, ProxySpec]) -> str:
     t = ticker.upper().strip()
     spec = proxy_map.get(t)
@@ -147,14 +141,12 @@ def resolve_proxy_ticker(ticker: str, proxy_map: Dict[str, ProxySpec]) -> str:
     if t in {"BCI", "DBC"}: return "^SPGSCI"
     return ""
 
-# Hybrid builder (ETF + Proxy splice)
-def build_hybrid_series_from_proxy(etf_ticker: str, proxy_ticker: str, start: str = "1970-01-01") -> pd.Series:
+def build_hybrid_series_from_proxy(etf_ticker: str, proxy_ticker: str, start: str = "1970-01-01", auto_adjust: bool = True) -> pd.Series:
+    s_etf = yf_download(etf_ticker, start=start, auto_adjust=auto_adjust)
     if not proxy_ticker:
-        s_etf = yf_download(etf_ticker, start=start)
         s_etf.name = f"HYBRID_{etf_ticker}"
         return s_etf
-    s_etf = yf_download(etf_ticker, start=start)
-    s_proxy = yf_download(proxy_ticker, start=start)
+    s_proxy = yf_download(proxy_ticker, start=start, auto_adjust=auto_adjust)
     if s_etf.empty and s_proxy.empty:
         return pd.Series(dtype=float, name=f"HYBRID_{etf_ticker}")
     idx = pd.date_range(
@@ -180,23 +172,78 @@ def build_hybrid_series_from_proxy(etf_ticker: str, proxy_ticker: str, start: st
     hybrid.name = f"HYBRID_{etf_ticker}"
     return hybrid.dropna()
 
-# Simple metrics
+# =============================
+# Metrics & Helpers
+# =============================
 def to_monthly(s: pd.Series) -> pd.Series:
     return s.resample("M").last()
 
+def drawdown_series(idx_series: pd.Series) -> Tuple[pd.Series, int]:
+    """Return drawdown series and longest underwater duration in months."""
+    if idx_series.empty:
+        return pd.Series(dtype=float), 0
+    peak = idx_series.cummax()
+    dd = idx_series / peak - 1.0
+    # longest underwater (below 0)
+    underwater = dd < 0
+    longest = curr = 0
+    for flag in underwater.astype(int):
+        if flag == 1:
+            curr += 1
+            longest = max(longest, curr)
+        else:
+            curr = 0
+    return dd, int(longest)
+
 def perf_metrics(series: pd.Series) -> dict:
+    """Compute performance metrics using monthly data."""
+    out = {"CAGR": np.nan, "Vol": np.nan, "MDD": np.nan, "Sharpe": np.nan, "Sortino": np.nan,
+           "UW_months": 0, "UW_years": np.nan, "CAGR_div_UW": np.nan}
     if series.empty:
-        return {"CAGR": np.nan, "Vol": np.nan, "MDD": np.nan}
+        return out
     idx = series / series.iloc[0] * 100.0
-    m = to_monthly(idx)
-    rets = m.pct_change().dropna()
-    years = (m.index[-1] - m.index[0]).days / 365.25
-    cagr = (m.iloc[-1] / m.iloc[0]) ** (1/years) - 1 if years > 0 else np.nan
+    m_idx = to_monthly(idx)
+    rets = m_idx.pct_change().dropna()
+    if rets.empty:
+        return out
+    years = (m_idx.index[-1] - m_idx.index[0]).days / 365.25
+    cagr = (m_idx.iloc[-1] / m_idx.iloc[0]) ** (1/years) - 1 if years > 0 else np.nan
     vol = rets.std() * math.sqrt(12)
-    roll_max = idx.cummax()
-    dd = idx / roll_max - 1
-    mdd = dd.min()
-    return {"CAGR": cagr, "Vol": vol, "MDD": mdd}
+    dd, uw_months = drawdown_series(m_idx)
+    mdd = dd.min() if not dd.empty else np.nan
+    # Sharpe (rf=0)
+    mean_ann = rets.mean() * 12
+    sharpe = (mean_ann / vol) if vol and np.isfinite(vol) and vol != 0 else np.nan
+    # Sortino (rf=0): downside stdev
+    downside = rets[rets < 0]
+    ddv = downside.std() * math.sqrt(12) if not downside.empty else np.nan
+    sortino = (mean_ann / ddv) if ddv and np.isfinite(ddv) and ddv != 0 else np.nan
+    uw_years = uw_months / 12.0
+    cagr_div_uw = (cagr / uw_years) if uw_years and uw_years > 0 else np.nan
+    out.update({"CAGR": cagr, "Vol": vol, "MDD": mdd, "Sharpe": sharpe, "Sortino": sortino,
+                "UW_months": uw_months, "UW_years": uw_years, "CAGR_div_UW": cagr_div_uw})
+    return out
+
+def simulate_value_from_index(port_index: pd.Series, initial_amount: float, monthly_contrib: float) -> pd.Series:
+    """
+    Simulate portfolio value from index(=100 base) using monthly compounding.
+    Contribution happens at each month-end AFTER growth for the month.
+    """
+    if port_index.empty:
+        return pd.Series(dtype=float)
+    m_idx = to_monthly(port_index)  # level series (e.g., 120, 130)
+    m_idx = m_idx / m_idx.iloc[0]  # normalize to 1.0
+    vals = []
+    balance = float(initial_amount)
+    prev = m_idx.iloc[0]
+    vals.append(balance)
+    for t, level in zip(m_idx.index[1:], m_idx.iloc[1:]):
+        growth = (level / prev)
+        balance = balance * float(growth) + float(monthly_contrib)
+        vals.append(balance)
+        prev = level
+    value_series = pd.Series(vals, index=m_idx.index, name="PortfolioValue")
+    return value_series
 
 # =============================
 # UI helpers (Intro/Presets; Result)
@@ -266,23 +313,18 @@ def render_featured_portfolios():
         with c1:
             st.dataframe(dfc, hide_index=True, use_container_width=True)
             if st.button(f"이 구성 불러오기", key=f"load_{i}"):
-                # 사이드바 데이터에 즉시 반영
                 new_df = pd.DataFrame({
                     "티커": dfc["티커"].astype(str).str.upper().str.strip().tolist(),
                     "비율 (%)": [float(x) for x in dfc["비중(%)"].tolist()],
                 })
                 st.session_state["portfolio_rows"] = new_df
-
-                # (선택) preset 저장 유지
                 st.session_state["preset_portfolio"] = {
                     "assets": new_df["티커"].tolist(),
                     "labels": dfc["자산"].tolist(),
                     "weights": new_df["비율 (%)"].tolist(),
                 }
-
                 st.success(f"‘{name}’ 구성을 사이드바에 반영했습니다.")
-                st.rerun()  # 즉시 리런해서 데이터에디터에 표시
-
+                st.rerun()
         with c2:
             sizes = dfc["비중(%)"].astype(float).tolist()
             labels = (dfc["자산"] + " (" + dfc["비중(%)"].astype(str) + "%)").tolist()
@@ -303,16 +345,42 @@ def render_comp_pie(comp_df: pd.DataFrame):
     ax.axis("equal")
     st.pyplot(fig)
 
-def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], comp_df: Optional[pd.DataFrame] = None):
+def fmt_pct(x: float) -> str:
+    return "—" if (x is None or not np.isfinite(x)) else f"{x*100:,.2f}%"
+
+def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], comp_df: Optional[pd.DataFrame],
+                   start_dt: date, end_dt: date, value_series: Optional[pd.Series]):
+    # 기간
+    st.markdown(f"**기간:** {start_dt.isoformat()} → {end_dt.isoformat()}  "
+                f"(총 {(end_dt - start_dt).days}일)")
     st.subheader("포트폴리오 지수 (=100 기준)")
     if port_series is None or port_series.empty:
         st.warning("표시할 결과가 없습니다.")
         return
     st.line_chart(port_series)
+
+    # 지표
     if metrics:
-        st.markdown(
-            f"**CAGR:** {metrics['CAGR']*100:,.2f}%  |  **변동성:** {metrics['Vol']*100:,.2f}%  |  **최대낙폭:** {metrics['MDD']*100:,.2f}%"
-        )
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("CAGR", fmt_pct(metrics["CAGR"]))
+        col2.metric("변동성(연)", fmt_pct(metrics["Vol"]))
+        col3.metric("최대낙폭", fmt_pct(metrics["MDD"]))
+        col4.metric("Sharpe", "—" if not np.isfinite(metrics["Sharpe"]) else f"{metrics['Sharpe']:.2f}")
+
+        col5, col6, col7 = st.columns(3)
+        col5.metric("Sortino", "—" if not np.isfinite(metrics["Sortino"]) else f"{metrics['Sortino']:.2f}")
+        col6.metric("최장 UW 기간", f"{metrics['UW_months']}개월 ({metrics['UW_years']:.2f}년)" if metrics["UW_months"] else "—")
+        col7.metric("CAGR / 최장 UW", "—" if not np.isfinite(metrics["CAGR_div_UW"]) else f"{metrics['CAGR_div_UW']:.2f}")
+
+    # Start/End Balance
+    if value_series is not None and not value_series.empty:
+        start_bal = float(value_series.iloc[0])
+        end_bal = float(value_series.iloc[-1])
+        st.markdown("---")
+        b1, b2 = st.columns(2)
+        b1.metric("Start Balance", f"{start_bal:,.0f}")
+        b2.metric("End Balance", f"{end_bal:,.0f}")
+
     st.markdown("---")
     st.subheader("구성 비율")
     col1, col2 = st.columns([1.2, 1])
@@ -325,7 +393,7 @@ def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], co
             st.caption("구성 데이터가 없습니다.")
 
 # =============================
-# Sidebar — Portfolio Editor
+# Sidebar — Portfolio Editor & Run Options
 # =============================
 st.sidebar.header("1) 포트폴리오 구성")
 
@@ -333,39 +401,27 @@ def _empty_rows(n=4):
     return pd.DataFrame({"티커": ["" for _ in range(n)], "비율 (%)": [0.0 for _ in range(n)]})
 
 if "portfolio_rows" not in st.session_state:
-    if "preset_portfolio" in st.session_state:
-        p = st.session_state["preset_portfolio"]
-        st.session_state["portfolio_rows"] = pd.DataFrame({
-            "티커": p.get("assets", []),
-            "비율 (%)": p.get("weights", []),
-        })
-    else:
-        st.session_state["portfolio_rows"] = _empty_rows()
+    st.session_state["portfolio_rows"] = _empty_rows()
 
-# Result-first state flags
-if "backtest_started" not in st.session_state:
-    st.session_state.backtest_started = False
-if "port_series" not in st.session_state:
-    st.session_state.port_series = None
-if "port_metrics" not in st.session_state:
-    st.session_state.port_metrics = None
-if "port_comp" not in st.session_state:
-    st.session_state.port_comp = None
+# result-first state
+st.session_state.setdefault("backtest_started", False)
+st.session_state.setdefault("port_series", None)
+st.session_state.setdefault("port_metrics", None)
+st.session_state.setdefault("port_comp", None)
+st.session_state.setdefault("port_value_series", None)
 
-# Ensure a few empty rows
+# ensure some empty rows
 base_df = st.session_state["portfolio_rows"]
 if len(base_df) < 6:
     base_df = pd.concat([base_df, _empty_rows(6 - len(base_df))], ignore_index=True)
 
-# Build auto mapping table from current tickers
 def build_proxy_table_with_autofix(df_in: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, ProxySpec]]:
     tickers = [t for t in df_in["티커"].astype(str).str.upper().str.strip().tolist() if t]
     report, pmap = audit_and_autofix_proxies(tickers, BASE_PROXY_MAP)
     rows = []
     for t in tickers:
         spec = pmap.get(t)
-        label = "알 수 없음"
-        proxy = ""
+        label = "알 수 없음"; proxy = ""
         if spec:
             proxy = spec.series
             label = f"{spec.name} / proxy: {proxy}"
@@ -387,7 +443,6 @@ def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
 editor_df = _append_total_row(base_df)
 
 label_map = {r.ETF: r.Label for _, r in proxy_table.iterrows()}
-
 def _label_for(t):
     t = str(t).upper().strip()
     if t == "합계": return "—"
@@ -408,24 +463,31 @@ edited_df_out = st.sidebar.data_editor(
     disabled=["추종지수(자동)"],
 )
 
-# Save back (drop total row)
 st.session_state["portfolio_rows"] = edited_df_out.iloc[:-1][["티커", "비율 (%)"]]
 
-st.sidebar.header("2) 기간 설정")
+st.sidebar.header("2) 기간 및 현금흐름 설정")
 colA, colB = st.sidebar.columns(2)
 with colA:
     start_date = st.date_input("시작일", value=date(1990,1,1))
 with colB:
     end_date = st.date_input("종료일", value=date.today())
 
+reinvest = st.sidebar.checkbox("배당 재투자(Adj Close 사용)", value=True, help="체크 해제 시 Close 사용 (총수익 제외)")
+initial_amount = st.sidebar.number_input("초기 금액", min_value=0, value=10_000_000, step=100_000)
+monthly_contrib = st.sidebar.number_input("월 납입액", min_value=0, value=0, step=100_00)
+
+st.sidebar.header("3) 실행")
 run_bt = st.sidebar.button("백테스트 실행", type="primary")
 reset_bt = st.sidebar.button("초기화(처음 화면으로)", type="secondary")
 
 if reset_bt:
-    st.session_state.backtest_started = False
-    st.session_state.port_series = None
-    st.session_state.port_metrics = None
-    st.session_state.port_comp = None
+    st.session_state.update({
+        "backtest_started": False,
+        "port_series": None,
+        "port_metrics": None,
+        "port_comp": None,
+        "port_value_series": None,
+    })
 
 # =============================
 # Backtest Execution
@@ -449,7 +511,6 @@ if run_bt:
             else:
                 weights = weights / weights.sum()
 
-                # ✅ 구성 DF (세션 저장용)
                 comp_df = pd.DataFrame({
                     "티커": dfp["티커"].tolist(),
                     "비중(%)": (weights * 100).round(2).tolist(),
@@ -459,9 +520,12 @@ if run_bt:
                 series_map = {}
                 for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
                     proxy_sym = resolve_proxy_ticker(t, proxy_map)
-                    hy = build_hybrid_series_from_proxy(t, proxy_sym, start=start_date.isoformat())
+                    hy = build_hybrid_series_from_proxy(
+                        t, proxy_sym, start=start_date.isoformat(), auto_adjust=reinvest
+                    )
                     series_map[t] = hy
-                # Align & combine
+
+                # Align & combine to portfolio index
                 all_idx = None
                 for s in series_map.values():
                     all_idx = s.index if all_idx is None else all_idx.union(s.index)
@@ -475,13 +539,18 @@ if run_bt:
                 port = port.loc[(port.index >= pd.to_datetime(start_date)) & (port.index <= pd.to_datetime(end_date))]
                 m = perf_metrics(port)
 
-                # Save to state for result-first rendering
-                st.session_state.backtest_started = True
-                st.session_state.port_series = port
-                st.session_state.port_metrics = m
-                st.session_state.port_comp = comp_df  # ✅ save composition for pie/table
+                # Simulate cash flows for balances (using monthly compounding)
+                value_series = simulate_value_from_index(port, initial_amount, monthly_contrib)
 
-    # Show mapping report after run
+                # Save to state
+                st.session_state.update({
+                    "backtest_started": True,
+                    "port_series": port,
+                    "port_metrics": m,
+                    "port_comp": comp_df,
+                    "port_value_series": value_series,
+                })
+
     with main_tab2:
         rep, _ = audit_and_autofix_proxies(dfp["티커"].tolist(), BASE_PROXY_MAP)
         st.dataframe(rep, use_container_width=True)
@@ -489,21 +558,20 @@ if run_bt:
 # =============================
 # Result-first / Intro visibility control
 # =============================
-if st.session_state.backtest_started:
-    # ✅ 결과를 최상단에 먼저 표시 (라인차트 + 지표 + 파이 + 구성표)
+if st.session_state["backtest_started"]:
     with main_tab1:
         render_results(
-            st.session_state.port_series,
-            st.session_state.port_metrics,
+            st.session_state["port_series"],
+            st.session_state["port_metrics"],
             st.session_state.get("port_comp"),
+            start_dt=start_date,
+            end_dt=end_date,
+            value_series=st.session_state.get("port_value_series"),
         )
-
-    # ✅ 실행 후: 토글은 '대표 포트폴리오'만 표시 (초기 안내는 제외)
     st.toggle("대표 포트폴리오 보기", value=False, key="show_presets_after_run")
     if st.session_state.get("show_presets_after_run"):
         render_featured_portfolios()
 else:
-    # ✅ 아직 실행 전: (기존 그대로) 안내 + 대표 포트폴리오 노출
     render_intro()
     render_featured_portfolios()
     with main_tab1:
@@ -512,4 +580,4 @@ else:
         st.dataframe(proxy_table, use_container_width=True)
 
 st.markdown("---")
-st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")
+st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")

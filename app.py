@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 # app.py — Integrated Streamlit app (result-first after backtest)
-# - Result-first UX: after "백테스트 실행", results appear at top and intro/presets are hidden
-# - Friendly intro for beginners (Korean)  ※ shown only before the first run or if toggled
-# - Representative portfolio presets (60:40, All Weather, GAA)
+# - Result-first UX: after "백테스트 실행", results appear at top and only '대표 포트폴리오' toggle remains
+# - Representative portfolio presets (60:40, All Weather, GAA) with one-click load (updates sidebar immediately)
 # - Sidebar editor shows "추종지수(자동)" without "알 수 없음" spam
 # - Auto audit & proxy mapping for ETFs (incl. IAU, BCI)
 # - Hybrid backfill: pre-listing period uses proxy; post-listing uses ETF
-# - Simple backtest: portfolio index, CAGR/Vol/MDD
+# - Simple backtest: portfolio index, CAGR/Vol/MDD + composition pie chart
 
 from __future__ import annotations
 import os
@@ -273,14 +272,14 @@ def render_featured_portfolios():
                     "비율 (%)": [float(x) for x in dfc["비중(%)"].tolist()],
                 })
                 st.session_state["portfolio_rows"] = new_df
-            
-                # (선택) 과거 방식의 preset도 유지하고 싶다면 남겨둬도 됨
+
+                # (선택) preset 저장 유지
                 st.session_state["preset_portfolio"] = {
                     "assets": new_df["티커"].tolist(),
                     "labels": dfc["자산"].tolist(),
                     "weights": new_df["비율 (%)"].tolist(),
                 }
-            
+
                 st.success(f"‘{name}’ 구성을 사이드바에 반영했습니다.")
                 st.rerun()  # 즉시 리런해서 데이터에디터에 표시
 
@@ -293,7 +292,18 @@ def render_featured_portfolios():
             st.pyplot(fig)
         st.markdown("---")
 
-def render_results(port_series: Optional[pd.Series], metrics: Optional[dict]):
+def render_comp_pie(comp_df: pd.DataFrame):
+    if comp_df is None or comp_df.empty:
+        st.warning("포트폴리오 구성이 비어 있습니다.")
+        return
+    sizes = comp_df["비중(%)"].astype(float).tolist()
+    labels = (comp_df["티커"].astype(str) + " (" + comp_df["비중(%)"].round(1).astype(str) + "%)").tolist()
+    fig, ax = plt.subplots()
+    ax.pie(sizes, labels=labels, autopct="%1.0f%%", startangle=90)
+    ax.axis("equal")
+    st.pyplot(fig)
+
+def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], comp_df: Optional[pd.DataFrame] = None):
     st.subheader("포트폴리오 지수 (=100 기준)")
     if port_series is None or port_series.empty:
         st.warning("표시할 결과가 없습니다.")
@@ -303,6 +313,16 @@ def render_results(port_series: Optional[pd.Series], metrics: Optional[dict]):
         st.markdown(
             f"**CAGR:** {metrics['CAGR']*100:,.2f}%  |  **변동성:** {metrics['Vol']*100:,.2f}%  |  **최대낙폭:** {metrics['MDD']*100:,.2f}%"
         )
+    st.markdown("---")
+    st.subheader("구성 비율")
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        render_comp_pie(comp_df if comp_df is not None else pd.DataFrame())
+    with col2:
+        if comp_df is not None and not comp_df.empty:
+            st.dataframe(comp_df, hide_index=True, use_container_width=True)
+        else:
+            st.caption("구성 데이터가 없습니다.")
 
 # =============================
 # Sidebar — Portfolio Editor
@@ -329,6 +349,8 @@ if "port_series" not in st.session_state:
     st.session_state.port_series = None
 if "port_metrics" not in st.session_state:
     st.session_state.port_metrics = None
+if "port_comp" not in st.session_state:
+    st.session_state.port_comp = None
 
 # Ensure a few empty rows
 base_df = st.session_state["portfolio_rows"]
@@ -403,6 +425,7 @@ if reset_bt:
     st.session_state.backtest_started = False
     st.session_state.port_series = None
     st.session_state.port_metrics = None
+    st.session_state.port_comp = None
 
 # =============================
 # Backtest Execution
@@ -425,6 +448,13 @@ if run_bt:
                 st.error("비중 합계가 0입니다. 비중을 입력해주세요.")
             else:
                 weights = weights / weights.sum()
+
+                # ✅ 구성 DF (세션 저장용)
+                comp_df = pd.DataFrame({
+                    "티커": dfp["티커"].tolist(),
+                    "비중(%)": (weights * 100).round(2).tolist(),
+                })
+
                 # Build each hybrid series
                 series_map = {}
                 for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
@@ -434,10 +464,7 @@ if run_bt:
                 # Align & combine
                 all_idx = None
                 for s in series_map.values():
-                    if all_idx is None:
-                        all_idx = s.index
-                    else:
-                        all_idx = all_idx.union(s.index)
+                    all_idx = s.index if all_idx is None else all_idx.union(s.index)
                 all_idx = pd.DatetimeIndex(sorted(all_idx))
                 parts = []
                 for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
@@ -452,6 +479,7 @@ if run_bt:
                 st.session_state.backtest_started = True
                 st.session_state.port_series = port
                 st.session_state.port_metrics = m
+                st.session_state.port_comp = comp_df  # ✅ save composition for pie/table
 
     # Show mapping report after run
     with main_tab2:
@@ -461,13 +489,14 @@ if run_bt:
 # =============================
 # Result-first / Intro visibility control
 # =============================
-# =============================
-# Result-first / Intro visibility control
-# =============================
 if st.session_state.backtest_started:
-    # ✅ 결과를 최상단에 먼저 표시
+    # ✅ 결과를 최상단에 먼저 표시 (라인차트 + 지표 + 파이 + 구성표)
     with main_tab1:
-        render_results(st.session_state.port_series, st.session_state.port_metrics)
+        render_results(
+            st.session_state.port_series,
+            st.session_state.port_metrics,
+            st.session_state.get("port_comp"),
+        )
 
     # ✅ 실행 후: 토글은 '대표 포트폴리오'만 표시 (초기 안내는 제외)
     st.toggle("대표 포트폴리오 보기", value=False, key="show_presets_after_run")
@@ -484,5 +513,3 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")
-
-

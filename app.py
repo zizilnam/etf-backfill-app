@@ -267,12 +267,23 @@ def render_featured_portfolios():
         with c1:
             st.dataframe(dfc, hide_index=True, use_container_width=True)
             if st.button(f"이 구성 불러오기", key=f"load_{i}"):
+                # 사이드바 데이터에 즉시 반영
+                new_df = pd.DataFrame({
+                    "티커": dfc["티커"].astype(str).str.upper().str.strip().tolist(),
+                    "비율 (%)": [float(x) for x in dfc["비중(%)"].tolist()],
+                })
+                st.session_state["portfolio_rows"] = new_df
+            
+                # (선택) 과거 방식의 preset도 유지하고 싶다면 남겨둬도 됨
                 st.session_state["preset_portfolio"] = {
-                    "assets": dfc["티커"].tolist(),
+                    "assets": new_df["티커"].tolist(),
                     "labels": dfc["자산"].tolist(),
-                    "weights": [float(x) for x in dfc["비중(%)"].tolist()],
+                    "weights": new_df["비율 (%)"].tolist(),
                 }
-                st.success(f"‘{name}’ 구성을 불러왔습니다. 좌측 사이드바에서 확인하세요.")
+            
+                st.success(f"‘{name}’ 구성을 사이드바에 반영했습니다.")
+                st.rerun()  # 즉시 리런해서 데이터에디터에 표시
+
         with c2:
             sizes = dfc["비중(%)"].astype(float).tolist()
             labels = (dfc["자산"] + " (" + dfc["비중(%)"].astype(str) + "%)").tolist()
@@ -473,4 +484,5 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")
+
 

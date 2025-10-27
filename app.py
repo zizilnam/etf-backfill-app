@@ -212,86 +212,106 @@ def perf_metrics(series: pd.Series) -> dict:
 # =============================
 # UI — Intro & Presets
 # =============================
-st.title("ETF 백필 포트폴리오 비주얼라이저")
-st.caption("ETF 상장 전 기간까지 추종지수로 백테스트하는 웹앱입니다. (기간: 자동 최대)")
+import streamlit as st
 
-st.markdown("---")
-left, right = st.columns([1.2, 1])
-with left:
-    st.subheader("🧭 처음 오셨나요?")
-    st.write(
-        """
-        이 웹앱은 **ETF 상장 이전 구간까지** 지수/프록시를 활용해 **하이브리드 시리즈**를 만들고,
-        포트폴리오 성과를 쉽게 비교할 수 있도록 돕습니다.
-        
-        - **분산투자**: 서로 다른 자산을 섞어 위험을 낮추고 안정적 성과를 추구
-        - **하이브리드 백필**: 상장 이전은 프록시 지수, 상장 이후는 실제 ETF로 이어 붙이기
-        - **리밸런싱**: 정기적으로 비중 복원(선택 사항)
-        """
-    )
-with right:
-    st.info("Tip: 좌측 사이드바에서 티커와 비중을 입력하고 '백테스트 실행'을 눌러보세요.")
+# --- 섹션 렌더 함수 예시 (이미 있다면 그대로 사용) ---
+def render_intro():
+    st.markdown("### 처음 오셨나요?")
+    st.write("- 이 앱은 ETF/인덱스 하이브리드 백테스트를 지원합니다.")
+    st.write("- 좌측에서 포트폴리오를 설정하고 ‘백테스트 실행’을 눌러주세요.")
 
-st.markdown("---")
+def render_featured_portfolios():
+    st.markdown("### 대표 포트폴리오 비교")
+    st.write("예시 포트폴리오들을 간단히 비교합니다.")
 
-# Representative portfolios with description
-PRESETS = {
-    "60:40 포트폴리오": {
-        "desc": "성장(주식)+안정(채권)의 기본형",
-        "composition": [
-            {"티커": "SPY", "자산": "미국 주식", "비중(%)": 60},
-            {"티커": "BND", "자산": "미국 종합채권", "비중(%)": 40},
-        ],
-    },
-    "올웨더 포트폴리오": {
-        "desc": "레이 달리오식 리스크 균형",
-        "composition": [
-            {"티커": "VTI",  "자산": "미국 주식",       "비중(%)": 30},
-            {"티커": "VGLT", "자산": "미국 장기국채",   "비중(%)": 40},
-            {"티커": "IEF",  "자산": "미국 중기국채",   "비중(%)": 15},
-            {"티커": "IAU",  "자산": "금",           "비중(%)": 7.5},
-            {"티커": "DBC",  "자산": "원자재",       "비중(%)": 7.5},
-        ],
-    },
-    "GAA 포트폴리오": {
-        "desc": "글로벌 광범위 분산",
-        "composition": [
-            {"티커": "VTI", "자산": "미국 주식",          "비중(%)": 10},
-            {"티커": "VEA", "자산": "선진국(미국 제외) 주식", "비중(%)": 10},
-            {"티커": "VWO", "자산": "신흥국 주식",        "비중(%)": 10},
-            {"티커": "VNQ", "자산": "REITs",            "비중(%)": 10},
-            {"티커": "BND", "자산": "미국 종합채권",      "비중(%)": 20},
-            {"티커": "IEF", "자산": "미국 중기국채",      "비중(%)": 10},
-            {"티커": "IAU", "자산": "금",               "비중(%)": 10},
-            {"티커": "DBC", "자산": "원자재",           "비중(%)": 10},
-            {"티커": "BIL", "자산": "현금/단기국채",     "비중(%)": 10},
-        ],
-    },
-}
+def render_inputs():
+    st.markdown("### 백테스트 설정")
+    # 👉 여기엔 기존 입력 위젯들 (티커, 비중, 시작/종료일, 리밸런싱 등) 배치
+    # 예시:
+    # tickers = st.text_input("ETF 티커(쉼표로 구분)", "QQQ,IEF")
+    # weights = st.text_input("비중(%)", "60,40")
+    # start = st.date_input("시작일", ...)
+    # end = st.date_input("종료일", ...)
+    # return dict(tickers=tickers, weights=weights, start=start, end=end)
+    return {}
 
-st.subheader("🚀 대표 포트폴리오 비교 & 빠른 불러오기")
-for i, (name, spec) in enumerate(PRESETS.items()):
-    st.markdown(f"#### 📊 {name}")
-    st.caption(spec.get("desc", ""))
-    dfc = pd.DataFrame(spec["composition"])
-    c1, c2 = st.columns([1.2, 1])
-    with c1:
-        st.dataframe(dfc, hide_index=True, use_container_width=True)
-        if st.button(f"이 구성 불러오기", key=f"load_{i}"):
-            st.session_state["preset_portfolio"] = {
-                "assets": dfc["티커"].tolist(),
-                "labels": dfc["자산"].tolist(),
-                "weights": [float(x) for x in dfc["비중(%)"].tolist()],
-            }
-            st.success(f"'{name}' 구성을 불러왔습니다. 좌측 사이드바에서 확인하세요.")
-    with c2:
-        sizes = dfc["비중(%)"].astype(float).tolist()
-        labels = (dfc["자산"] + " (" + dfc["비중(%)"].astype(str) + "%)").tolist()
-        fig, ax = plt.subplots()
-        ax.pie(sizes, labels=labels, autopct='%1.0f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-    st.markdown("---")
+def run_backtest(params):
+    # 👉 실제 백테스트 로직 호출
+    # df, metrics, charts = ...
+    # 예시 결과 리턴
+    return {
+        "summary": {"CAGR": "8.4%", "MDD": "-17.2%", "Sharpe": "0.68"},
+        "note": "샘플 결과입니다. 실제 로직에 연결하세요."
+    }
+
+def render_results(result):
+    st.markdown("## 백테스트 결과")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("CAGR", result["summary"]["CAGR"])
+    col2.metric("MDD", result["summary"]["MDD"])
+    col3.metric("Sharpe", result["summary"]["Sharpe"])
+    st.caption(result.get("note", ""))
+
+# --- 여기부터 메인 흐름 ---
+def main():
+    st.set_page_config(layout="wide")
+    st.title("ETF 백테스트 확장 웹앱")
+
+    # 1) 상태 플래그 기본값
+    if "backtest_started" not in st.session_state:
+        st.session_state.backtest_started = False
+    if "last_params" not in st.session_state:
+        st.session_state.last_params = None
+    if "last_result" not in st.session_state:
+        st.session_state.last_result = None
+
+    # 2) 입력 폼
+    with st.form(key="bt_form", clear_on_submit=False):
+        params = render_inputs()
+        submitted = st.form_submit_button("백테스트 실행", use_container_width=True)
+
+    # 3) 버튼을 누르면: 플래그 True + 결과 계산
+    if submitted:
+        st.session_state.backtest_started = True
+        st.session_state.last_params = params
+        st.session_state.last_result = run_backtest(params)
+
+    # 4) 플래그에 따라 섹션 표시 순서/가시성 제어
+    if st.session_state.backtest_started:
+        # ✅ 결과를 최상단에 먼저 표시
+        render_results(st.session_state.last_result)
+
+        # 선택: 결과 하단에 입력 섹션(재실행용)만 노출
+        with st.expander("설정 다시 열기 / 재실행", expanded=False):
+            with st.form(key="bt_form_again", clear_on_submit=False):
+                params = render_inputs()
+                re_submitted = st.form_submit_button("다시 백테스트 실행", use_container_width=True)
+            if re_submitted:
+                st.session_state.last_params = params
+                st.session_state.last_result = run_backtest(params)
+                st.experimental_rerun()
+
+        # 선택: 초기안내/대표포트폴리오 토글 스위치(기본은 숨김)
+        st.toggle("초기 안내/대표 포트폴리오 보기", value=False, key="show_guides")
+        if st.session_state.show_guides:
+            st.info("초기 안내/대표 포트폴리오는 백테스트 실행 후 기본적으로 숨깁니다.")
+            render_intro()
+            render_featured_portfolios()
+
+        # 리셋 버튼(완전 초기화)
+        if st.button("초기화(처음 화면으로)", type="secondary"):
+            st.session_state.backtest_started = False
+            st.session_state.last_params = None
+            st.session_state.last_result = None
+            st.experimental_rerun()
+
+    else:
+        # ✅ 처음 화면(아직 실행 전): 안내와 대표 포트폴리오 노출
+        render_intro()
+        render_featured_portfolios()
+
+if __name__ == "__main__":
+    main()
 
 # =============================
 # Sidebar — Portfolio Editor
@@ -441,3 +461,4 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: IAU/BCI 등 일부 ETF는 공식 '지수'가 공개 표준화되어 있지 않아, Yahoo에서 접근 가능한 대체 프록시(GLD, ^SPGSCI 등)로 자동 매핑합니다. 더 정교한 지수(예: BCOMTR)를 쓰려면 데이터 소스를 추가하세요.")
+

@@ -19,6 +19,46 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
+# ===== Korean font setup (matplotlib & system-agnostic) =====
+from matplotlib import font_manager, rcParams
+
+def set_korean_font():
+    # 1) 앱 로컬에 폰트를 넣었을 경우(권장): ./fonts/NanumGothic.ttf
+    local_candidates = [
+        os.path.join(os.path.dirname(__file__), "fonts", "NanumGothic.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "NanumGothic.ttf"),
+    ]
+    # 2) OS 기본 폰트 경로들
+    system_candidates = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",           # Linux
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",    # Linux (Noto)
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",                # macOS
+        "C:/Windows/Fonts/malgun.ttf",                               # Windows
+    ]
+    candidates = local_candidates + system_candidates
+
+    chosen = None
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                font_manager.fontManager.addfont(p)
+                chosen = font_manager.FontProperties(fname=p).get_name()
+                break
+            except Exception:
+                continue
+
+    # 폰트를 못 찾았어도 앱이 죽지 않도록 처리
+    if chosen:
+        rcParams["font.family"] = chosen
+    else:
+        # 최소한 한글 포함 가능성이 있는 패밀리 지정 시도
+        rcParams["font.family"] = "NanumGothic, Apple SD Gothic Neo, Malgun Gothic, Noto Sans CJK KR, DejaVu Sans"
+
+    rcParams["axes.unicode_minus"] = False  # 마이너스 기호 깨짐 방지
+
+set_korean_font()
+
 # Optional: Korean font for matplotlib (best-effort)
 try:
     from matplotlib import font_manager, rcParams
@@ -348,6 +388,26 @@ def render_comp_pie(comp_df: pd.DataFrame):
 def fmt_pct(x: float) -> str:
     return "—" if (x is None or not np.isfinite(x)) else f"{x*100:,.2f}%"
 
+def render_line_chart_matplotlib(series, title="포트폴리오 지수 (=100 기준)"):
+    import matplotlib.pyplot as plt
+    import streamlit as st
+
+    # 그래프 없으면 안내
+    if series is None or series.empty:
+        st.warning("표시할 결과가 없습니다.")
+        return
+
+    # 그래프 그리기
+    fig, ax = plt.subplots()
+    ax.plot(series.index, series.values, linewidth=2)
+    ax.set_title(title)
+    ax.set_ylabel("지수")
+    ax.grid(True, alpha=0.3)
+
+    # Streamlit 화면에 표시
+    st.pyplot(fig)
+
+
 def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], comp_df: Optional[pd.DataFrame],
                    start_dt: date, end_dt: date, value_series: Optional[pd.Series]):
     # 기간
@@ -357,7 +417,7 @@ def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], co
     if port_series is None or port_series.empty:
         st.warning("표시할 결과가 없습니다.")
         return
-    st.line_chart(port_series)
+    render_line_chart_matplotlib(port_series, title="포트폴리오 지수 (=100 기준)")
 
     # 지표
     if metrics:
@@ -581,3 +641,4 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")
+

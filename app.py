@@ -21,6 +21,20 @@ import matplotlib.pyplot as plt
 
 # ===== Korean font setup (matplotlib & system-agnostic) =====
 from matplotlib import font_manager, rcParams
+# ----- 한글 폰트 설정 -----
+from matplotlib import font_manager, rcParams
+import os
+
+def set_korean_font():
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "NanumGothic.ttf")
+    if os.path.exists(font_path):
+        font_manager.fontManager.addfont(font_path)
+        rcParams["font.family"] = font_manager.FontProperties(fname=font_path).get_name()
+    else:
+        rcParams["font.family"] = "Malgun Gothic, Apple SD Gothic Neo, NanumGothic, DejaVu Sans"
+    rcParams["axes.unicode_minus"] = False  # 마이너스 깨짐 방지
+
+set_korean_font()
 
 def set_korean_font():
     # 1) 앱 로컬에 폰트를 넣었을 경우(권장): ./fonts/NanumGothic.ttf
@@ -641,4 +655,5 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")
+
 

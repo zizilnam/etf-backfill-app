@@ -506,6 +506,12 @@ def render_results(
     st.markdown("---")
     st.subheader("성과 지표 비교표")
     if metrics is not None:
+        # value_series에서 시작/종료 잔고 계산
+        start_bal = end_bal = np.nan
+        if value_series is not None and not value_series.empty:
+            start_bal = float(value_series.iloc[0])
+            end_bal = float(value_series.iloc[-1])
+    
         rows = [
             ["CAGR",            metrics["CAGR"],            bench_metrics["CAGR"]            if bench_metrics else np.nan],
             ["Volatility",      metrics["Vol"],             bench_metrics["Vol"]             if bench_metrics else np.nan],
@@ -514,9 +520,11 @@ def render_results(
             ["Sortino",         metrics["Sortino"],         bench_metrics["Sortino"]         if bench_metrics else np.nan],
             ["UW (months)",     float(metrics["UW_months"]),float(bench_metrics["UW_months"]) if bench_metrics else np.nan],
             ["CAGR / UW(years)",metrics["CAGR_div_UW"],     bench_metrics["CAGR_div_UW"]     if bench_metrics else np.nan],
+            ["Start Balance",   start_bal,                  np.nan],
+            ["End Balance",     end_bal,                    np.nan],
         ]
         comp_tbl = pd.DataFrame(rows, columns=["지표", "포트폴리오", bench_label or "벤치마크"])
-        # 형식 지정: % 표기 가능한 항목 포맷
+    
         pct_cols = {"CAGR", "Volatility", "Max Drawdown"}
         def _fmt(z, row_name):
             if row_name in pct_cols:
@@ -525,13 +533,19 @@ def render_results(
                 return "—" if not np.isfinite(z) else f"{z:.2f}"
             if row_name == "UW (months)":
                 return "—" if not np.isfinite(z) else f"{z:.0f}개월"
+            if row_name in {"Start Balance", "End Balance"}:
+                return "—" if not np.isfinite(z) else f"{z:,.0f}"
             return z
-        comp_tbl["포맷_포트"] = [ _fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl["포트폴리오"]) ]
-        comp_tbl["포맷_벤치"] = [ _fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl[bench_label or "벤치마크"]) ]
-        show_tbl = comp_tbl[["지표", "포맷_포트", "포맷_벤치"]].rename(columns={"포맷_포트":"포트폴리오", "포맷_벤치": bench_label or "벤치마크"})
+    
+        comp_tbl["포맷_포트"] = [_fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl["포트폴리오"])]
+        comp_tbl["포맷_벤치"] = [_fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl[bench_label or "벤치마크"])]
+        show_tbl = comp_tbl[["지표", "포맷_포트", "포맷_벤치"]].rename(columns={
+            "포맷_포트": "포트폴리오", "포맷_벤치": bench_label or "벤치마크"
+        })
         st.dataframe(show_tbl, hide_index=True, use_container_width=True)
     else:
         st.caption("지표가 없습니다.")
+
 
     st.markdown("---")
     st.subheader("구성 비율")

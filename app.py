@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-# ETF Backfill Portfolio Visualizer — Result-first + Extended Metrics & Cash Flows
+# ETF Backfill Portfolio Visualizer — Result-first + Extended Metrics & Cash Flows + Benchmark Compare
 # - Result-first UX after run
 # - Presets load → sidebar immediate update
 # - Added inputs: Initial Amount, Monthly Contribution, Dividend Reinvest (Adj Close)
 # - Added metrics: Period, Longest Underwater, Sortino, Sharpe, CAGR/Longest UW, Start/End Balance
 # - Composition pie & table
+# - NEW: Benchmark selection (S&P500 / 60-40 / All Weather / Global Market / None)
+#        → overlay chart + side-by-side metrics table
 
 from __future__ import annotations
 import os
@@ -98,8 +100,8 @@ BASE_PROXY_MAP: Dict[str, ProxySpec] = {
     "VEA":  ProxySpec("YF", "VEA", "Dev ex-US (ETF proxy)"),
     "VWO":  ProxySpec("YF", "VWO", "EM Equities (ETF proxy)"),
     "VNQ":  ProxySpec("YF", "VNQ", "U.S. REITs (ETF proxy)"),
-    "IEF":  ProxySpec("YF", "IEF", "U.S. Treasury 7-10y (ETF proxy)"),
-    "VGLT": ProxySpec("YF", "VGLT", "U.S. Treasury Long (ETF proxy)"),
+    "IEF":  ProxySpec("YF", "IEF", "U.S. Treasury 7-10y (ETF)"),
+    "VGLT": ProxySpec("YF", "VGLT", "U.S. Treasury Long (ETF)"),
     "BND":  ProxySpec("YF", "AGG", "U.S. Aggregate (AGG as proxy)"),
     "AGG":  ProxySpec("YF", "AGG", "U.S. Aggregate Bonds"),
     "BIL":  ProxySpec("YF", "BIL", "1-3M T-Bill"),
@@ -110,6 +112,7 @@ BASE_PROXY_MAP: Dict[str, ProxySpec] = {
     "IAUUSD":ProxySpec("YF", "XAUUSD=X","Spot Gold USD"),
     "DBC":  ProxySpec("YF", "DBC",     "Broad Commodities (ETF)"),
     "BCI":  ProxySpec("YF", "^SPGSCI", "S&P GSCI Index (broad commodity)"),
+    "VT":   ProxySpec("YF", "VT",      "Global Market (ETF)"),
 }
 
 @st.cache_data(show_spinner=False)
@@ -285,6 +288,47 @@ def simulate_value_from_index(port_index: pd.Series, initial_amount: float, mont
     value_series = pd.Series(vals, index=m_idx.index, name="PortfolioValue")
     return value_series
 
+def fmt_pct(x: float) -> str:
+    return "—" if (x is None or not np.isfinite(x)) else f"{x*100:,.2f}%"
+
+# ===== NEW: generic builder (reused for Portfolio & Benchmark) =====
+def build_index_from_assets(
+    tickers: List[str],
+    weights: List[float],
+    proxy_map: Dict[str, ProxySpec],
+    start_date: date,
+    end_date: date,
+    reinvest: bool
+) -> pd.Series:
+    if not tickers or not weights or sum(weights) == 0:
+        return pd.Series(dtype=float)
+    weights = np.array(weights, dtype=float)
+    weights = weights / weights.sum()
+
+    series_map = {}
+    for t, w in zip(tickers, weights.tolist()):
+        proxy_sym = resolve_proxy_ticker(t, proxy_map)
+        hy = build_hybrid_series_from_proxy(
+            t, proxy_sym, start=start_date.isoformat(), auto_adjust=reinvest
+        )
+        series_map[t] = hy
+
+    # Align & combine to index
+    all_idx = None
+    for s in series_map.values():
+        all_idx = s.index if all_idx is None else all_idx.union(s.index)
+    if all_idx is None:
+        return pd.Series(dtype=float)
+    all_idx = pd.DatetimeIndex(sorted(all_idx))
+    parts = []
+    for t, w in zip(tickers, weights.tolist()):
+        s = series_map[t].reindex(all_idx).ffill()
+        s = s / s.iloc[0] * 100.0
+        parts.append(s * w)
+    out = pd.concat(parts, axis=1).sum(axis=1).dropna()
+    out = out.loc[(out.index >= pd.to_datetime(start_date)) & (out.index <= pd.to_datetime(end_date))]
+    return out
+
 # =============================
 # UI helpers (Intro/Presets; Result)
 # =============================
@@ -385,9 +429,6 @@ def render_comp_pie(comp_df: pd.DataFrame):
     ax.axis("equal")
     st.pyplot(fig)
 
-def fmt_pct(x: float) -> str:
-    return "—" if (x is None or not np.isfinite(x)) else f"{x*100:,.2f}%"
-
 def render_line_chart_matplotlib(series, title="포트폴리오 지수 (=100 기준)"):
     import matplotlib.pyplot as plt
     import streamlit as st
@@ -407,19 +448,39 @@ def render_line_chart_matplotlib(series, title="포트폴리오 지수 (=100 기
     # Streamlit 화면에 표시
     st.pyplot(fig)
 
-
-def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], comp_df: Optional[pd.DataFrame],
-                   start_dt: date, end_dt: date, value_series: Optional[pd.Series]):
+# ===== NEW: 결과 렌더러 (벤치마크 비교 포함) =====
+def render_results(
+    port_series: Optional[pd.Series],
+    metrics: Optional[dict],
+    comp_df: Optional[pd.DataFrame],
+    start_dt: date,
+    end_dt: date,
+    value_series: Optional[pd.Series],
+    bench_series: Optional[pd.Series] = None,
+    bench_label: Optional[str] = None,
+    bench_metrics: Optional[dict] = None
+):
     # 기간
     st.markdown(f"**기간:** {start_dt.isoformat()} → {end_dt.isoformat()}  "
                 f"(총 {(end_dt - start_dt).days}일)")
-    st.subheader("포트폴리오 지수 (=100 기준)")
+    st.subheader("누적 수익률 비교 (포트폴리오 vs 벤치마크)")
+
     if port_series is None or port_series.empty:
         st.warning("표시할 결과가 없습니다.")
         return
-    render_line_chart_matplotlib(port_series, title="포트폴리오 지수 (=100 기준)")
 
-    # 지표
+    # === Overlay chart ===
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(port_series.index, port_series.values, label="포트폴리오", linewidth=2)
+    if bench_series is not None and not bench_series.empty:
+        ax.plot(bench_series.index, bench_series.values, label=(bench_label or "벤치마크"), linestyle="--", alpha=0.9)
+    ax.set_title("누적 수익률 (=100 기준)")
+    ax.set_ylabel("지수")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    st.pyplot(fig)
+
+    # 핵심 지표 카드
     if metrics:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("CAGR", fmt_pct(metrics["CAGR"]))
@@ -440,6 +501,37 @@ def render_results(port_series: Optional[pd.Series], metrics: Optional[dict], co
         b1, b2 = st.columns(2)
         b1.metric("Start Balance", f"{start_bal:,.0f}")
         b2.metric("End Balance", f"{end_bal:,.0f}")
+
+    # === NEW: 성과 비교표 ===
+    st.markdown("---")
+    st.subheader("성과 지표 비교표")
+    if metrics is not None:
+        rows = [
+            ["CAGR",            metrics["CAGR"],            bench_metrics["CAGR"]            if bench_metrics else np.nan],
+            ["Volatility",      metrics["Vol"],             bench_metrics["Vol"]             if bench_metrics else np.nan],
+            ["Max Drawdown",    metrics["MDD"],             bench_metrics["MDD"]             if bench_metrics else np.nan],
+            ["Sharpe",          metrics["Sharpe"],          bench_metrics["Sharpe"]          if bench_metrics else np.nan],
+            ["Sortino",         metrics["Sortino"],         bench_metrics["Sortino"]         if bench_metrics else np.nan],
+            ["UW (months)",     float(metrics["UW_months"]),float(bench_metrics["UW_months"]) if bench_metrics else np.nan],
+            ["CAGR / UW(years)",metrics["CAGR_div_UW"],     bench_metrics["CAGR_div_UW"]     if bench_metrics else np.nan],
+        ]
+        comp_tbl = pd.DataFrame(rows, columns=["지표", "포트폴리오", bench_label or "벤치마크"])
+        # 형식 지정: % 표기 가능한 항목 포맷
+        pct_cols = {"CAGR", "Volatility", "Max Drawdown"}
+        def _fmt(z, row_name):
+            if row_name in pct_cols:
+                return "—" if not np.isfinite(z) else f"{z*100:,.2f}%"
+            if row_name in {"Sharpe", "Sortino", "CAGR / UW(years)"}:
+                return "—" if not np.isfinite(z) else f"{z:.2f}"
+            if row_name == "UW (months)":
+                return "—" if not np.isfinite(z) else f"{z:.0f}개월"
+            return z
+        comp_tbl["포맷_포트"] = [ _fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl["포트폴리오"]) ]
+        comp_tbl["포맷_벤치"] = [ _fmt(v, r) for r, v in zip(comp_tbl["지표"], comp_tbl[bench_label or "벤치마크"]) ]
+        show_tbl = comp_tbl[["지표", "포맷_포트", "포맷_벤치"]].rename(columns={"포맷_포트":"포트폴리오", "포맷_벤치": bench_label or "벤치마크"})
+        st.dataframe(show_tbl, hide_index=True, use_container_width=True)
+    else:
+        st.caption("지표가 없습니다.")
 
     st.markdown("---")
     st.subheader("구성 비율")
@@ -469,6 +561,10 @@ st.session_state.setdefault("port_series", None)
 st.session_state.setdefault("port_metrics", None)
 st.session_state.setdefault("port_comp", None)
 st.session_state.setdefault("port_value_series", None)
+# NEW: benchmark state
+st.session_state.setdefault("bench_series", None)
+st.session_state.setdefault("bench_metrics", None)
+st.session_state.setdefault("bench_label", None)
 
 # ensure some empty rows
 base_df = st.session_state["portfolio_rows"]
@@ -525,7 +621,19 @@ edited_df_out = st.sidebar.data_editor(
 
 st.session_state["portfolio_rows"] = edited_df_out.iloc[:-1][["티커", "비율 (%)"]]
 
-st.sidebar.header("2) 기간 및 현금흐름 설정")
+# ===== NEW: Benchmark selector =====
+st.sidebar.header("2) 벤치마크 선택")
+BENCHMARK_PRESETS: Dict[str, Optional[Tuple[List[str], List[float]]]] = {
+    "없음 (No Benchmark)": None,
+    "S&P 500 (SPY)": (["SPY"], [1.0]),
+    "60/40 (SPY/IEF)": (["SPY", "IEF"], [0.60, 0.40]),
+    "All Weather (VTI/VGLT/IEF/IAU/DBC)": (["VTI", "VGLT", "IEF", "IAU", "DBC"], [0.30, 0.40, 0.15, 0.075, 0.075]),
+    "Global Market (VT)": (["VT"], [1.0]),
+}
+bench_choice = st.sidebar.selectbox("📊 벤치마크", list(BENCHMARK_PRESETS.keys()), index=1)
+
+# ===== 기존 섹션 이름 한 칸 뒤로 (기간/현금흐름이 3번으로) =====
+st.sidebar.header("3) 기간 및 현금흐름 설정")
 colA, colB = st.sidebar.columns(2)
 with colA:
     start_date = st.date_input("시작일", value=date(1990,1,1))
@@ -536,7 +644,7 @@ reinvest = st.sidebar.checkbox("배당 재투자(Adj Close 사용)", value=True,
 initial_amount = st.sidebar.number_input("초기 금액", min_value=0, value=10_000_000, step=100_000)
 monthly_contrib = st.sidebar.number_input("월 납입액", min_value=0, value=0, step=100_00)
 
-st.sidebar.header("3) 실행")
+st.sidebar.header("4) 실행")
 run_bt = st.sidebar.button("백테스트 실행", type="primary")
 reset_bt = st.sidebar.button("초기화(처음 화면으로)", type="secondary")
 
@@ -547,6 +655,9 @@ if reset_bt:
         "port_metrics": None,
         "port_comp": None,
         "port_value_series": None,
+        "bench_series": None,
+        "bench_metrics": None,
+        "bench_label": None,
     })
 
 # =============================
@@ -576,31 +687,38 @@ if run_bt:
                     "비중(%)": (weights * 100).round(2).tolist(),
                 })
 
-                # Build each hybrid series
-                series_map = {}
-                for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
-                    proxy_sym = resolve_proxy_ticker(t, proxy_map)
-                    hy = build_hybrid_series_from_proxy(
-                        t, proxy_sym, start=start_date.isoformat(), auto_adjust=reinvest
-                    )
-                    series_map[t] = hy
-
-                # Align & combine to portfolio index
-                all_idx = None
-                for s in series_map.values():
-                    all_idx = s.index if all_idx is None else all_idx.union(s.index)
-                all_idx = pd.DatetimeIndex(sorted(all_idx))
-                parts = []
-                for t, w in zip(dfp["티커"].tolist(), weights.tolist()):
-                    s = series_map[t].reindex(all_idx).ffill()
-                    s = s / s.iloc[0] * 100.0
-                    parts.append(s * w)
-                port = pd.concat(parts, axis=1).sum(axis=1).dropna()
-                port = port.loc[(port.index >= pd.to_datetime(start_date)) & (port.index <= pd.to_datetime(end_date))]
+                # === Portfolio index ===
+                port = build_index_from_assets(
+                    tickers=dfp["티커"].tolist(),
+                    weights=weights.tolist(),
+                    proxy_map=proxy_map,
+                    start_date=start_date,
+                    end_date=end_date,
+                    reinvest=reinvest
+                )
                 m = perf_metrics(port)
 
                 # Simulate cash flows for balances (using monthly compounding)
                 value_series = simulate_value_from_index(port, initial_amount, monthly_contrib)
+
+                # === Benchmark index (if selected) ===
+                bench_label = bench_choice
+                bench_series = None
+                bench_metrics = None
+                bench_spec = BENCHMARK_PRESETS.get(bench_choice)
+                if bench_spec is not None:
+                    b_assets, b_weights = bench_spec
+                    # NOTE: 같은 프록시 매핑 로직/하이브리드 규칙 적용
+                    bench_series = build_index_from_assets(
+                        tickers=b_assets,
+                        weights=b_weights,
+                        proxy_map=proxy_map,
+                        start_date=start_date,
+                        end_date=end_date,
+                        reinvest=reinvest
+                    )
+                    if bench_series is not None and not bench_series.empty:
+                        bench_metrics = perf_metrics(bench_series)
 
                 # Save to state
                 st.session_state.update({
@@ -609,10 +727,14 @@ if run_bt:
                     "port_metrics": m,
                     "port_comp": comp_df,
                     "port_value_series": value_series,
+                    "bench_series": bench_series,
+                    "bench_metrics": bench_metrics,
+                    "bench_label": bench_label if bench_spec is not None else None,
                 })
 
     with main_tab2:
-        rep, _ = audit_and_autofix_proxies(dfp["티커"].tolist(), BASE_PROXY_MAP)
+        # 매핑 리포트
+        rep, _ = audit_and_autofix_proxies(st.session_state["portfolio_rows"]["티커"].tolist(), BASE_PROXY_MAP)
         st.dataframe(rep, use_container_width=True)
 
 # =============================
@@ -627,6 +749,9 @@ if st.session_state["backtest_started"]:
             start_dt=start_date,
             end_dt=end_date,
             value_series=st.session_state.get("port_value_series"),
+            bench_series=st.session_state.get("bench_series"),
+            bench_label=st.session_state.get("bench_label"),
+            bench_metrics=st.session_state.get("bench_metrics"),
         )
     st.toggle("대표 포트폴리오 보기", value=False, key="show_presets_after_run")
     if st.session_state.get("show_presets_after_run"):
@@ -641,4 +766,3 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")
-

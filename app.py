@@ -480,28 +480,6 @@ def render_results(
     ax.legend()
     st.pyplot(fig)
 
-    # 핵심 지표 카드
-    if metrics:
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("CAGR", fmt_pct(metrics["CAGR"]))
-        col2.metric("변동성(연)", fmt_pct(metrics["Vol"]))
-        col3.metric("최대낙폭", fmt_pct(metrics["MDD"]))
-        col4.metric("Sharpe", "—" if not np.isfinite(metrics["Sharpe"]) else f"{metrics['Sharpe']:.2f}")
-
-        col5, col6, col7 = st.columns(3)
-        col5.metric("Sortino", "—" if not np.isfinite(metrics["Sortino"]) else f"{metrics['Sortino']:.2f}")
-        col6.metric("최장 UW 기간", f"{metrics['UW_months']}개월 ({metrics['UW_years']:.2f}년)" if metrics["UW_months"] else "—")
-        col7.metric("CAGR / 최장 UW", "—" if not np.isfinite(metrics["CAGR_div_UW"]) else f"{metrics['CAGR_div_UW']:.2f}")
-
-    # Start/End Balance
-    if value_series is not None and not value_series.empty:
-        start_bal = float(value_series.iloc[0])
-        end_bal = float(value_series.iloc[-1])
-        st.markdown("---")
-        b1, b2 = st.columns(2)
-        b1.metric("Start Balance", f"{start_bal:,.0f}")
-        b2.metric("End Balance", f"{end_bal:,.0f}")
-
     # === NEW: 성과 비교표 ===
     st.markdown("---")
     st.subheader("성과 지표 비교표")
@@ -780,3 +758,4 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")
+

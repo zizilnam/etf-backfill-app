@@ -705,6 +705,9 @@ def _label_for(t):
 
 
 # 입력 안정성을 위해 "추종지수(자동)" 열 제거 (타이핑 중 지연/리렌더 방지)
+# (권장) 에디터에 보여줄 열만 유지
+editor_df = editor_df[["티커", "비율 (%)"]]
+
 edited_df_out = st.sidebar.data_editor(
     editor_df,
     num_rows="dynamic",
@@ -712,14 +715,12 @@ edited_df_out = st.sidebar.data_editor(
     key="portfolio_editor",
     column_config={
         "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, IAU, BCI"),
-        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
-    },
-),
-        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
-        "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="자동 매핑 라벨", disabled=True),
-    },
-    disabled=["추종지수(자동)"],
-)
+        "비율 (%)": st.column_config.NumberColumn(
+            "비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"
+        ),
+    }
+)  # ← 여기 끝에 콤마(,) 넣지 마세요!
+
 
 st.session_state["portfolio_rows"] = edited_df_out.iloc[:-1][["티커", "비율 (%)"]]
 
@@ -910,3 +911,4 @@ else:
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")
+

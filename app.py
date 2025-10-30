@@ -324,7 +324,7 @@ def build_index_from_assets(
         )
         series_map[t] = hy
 
-    # Align & combine to index
+    # Align & combine to index (buy & hold, no rebal)
     all_idx = None
     for s in series_map.values():
         all_idx = s.index if all_idx is None else all_idx.union(s.index)
@@ -338,6 +338,76 @@ def build_index_from_assets(
         parts.append(s * w)
     out = pd.concat(parts, axis=1).sum(axis=1).dropna()
     out = out.loc[(out.index >= pd.to_datetime(start_date)) & (out.index <= pd.to_datetime(end_date))]
+    return out
+
+
+def build_index_from_assets_with_rebal(
+    tickers: List[str],
+    weights: List[float],
+    proxy_map: Dict[str, ProxySpec],
+    start_date: date,
+    end_date: date,
+    reinvest: bool,
+    rebalance: str = "NONE",  # NONE, MONTHLY, QUARTERLY, SEMI, ANNUAL
+) -> pd.Series:
+    """Build a monthly index (=100 base) with periodic rebalancing of *target* weights."""
+    if not tickers or not weights or sum(weights) == 0:
+        return pd.Series(dtype=float)
+    w_target = np.array(weights, dtype=float)
+    w_target = w_target / w_target.sum()
+
+    # 1) Load hybrid price series per asset
+    price_map = {}
+    for t in tickers:
+        proxy_sym = resolve_proxy_ticker(t, proxy_map)
+        hy = build_hybrid_series_from_proxy(t, proxy_sym, start=start_date.isoformat(), auto_adjust=reinvest)
+        price_map[t] = hy
+
+    # 2) Monthly last prices & returns
+    mpx = []
+    for t in tickers:
+        s = to_monthly(price_map[t]).rename(t)
+        mpx.append(s)
+    if not mpx:
+        return pd.Series(dtype=float)
+    mpx = pd.concat(mpx, axis=1).dropna(how="any")
+    mpx = mpx.loc[(mpx.index >= pd.to_datetime(start_date)) & (mpx.index <= pd.to_datetime(end_date))]
+    if mpx.shape[0] < 2:
+        return (mpx.iloc[:,0] / mpx.iloc[0,0] * 100.0)
+
+    rets = mpx.pct_change().dropna()
+
+    # 3) Rebalancing rule
+    def is_rebalance_month(ts: pd.Timestamp) -> bool:
+        if rebalance == "NONE":
+            return False
+        m = ts.month
+        if rebalance == "MONTHLY":
+            return True
+        if rebalance == "QUARTERLY":
+            return m in {3,6,9,12}
+        if rebalance == "SEMI":
+            return m in {6,12}
+        if rebalance == "ANNUAL":
+            return m == 12
+        return False
+
+    # 4) Iterate months
+    w = w_target.copy()
+    idx_level = [100.0]
+    for i, (ts, row) in enumerate(rets.iterrows(), start=1):
+        # portfolio monthly return
+        port_ret = float(np.nansum(w * row.values))
+        idx_level.append(idx_level[-1] * (1.0 + port_ret))
+        # update weights by drift
+        w = w * (1.0 + row.values)
+        tw = np.nansum(w)
+        w = w / tw if tw and np.isfinite(tw) else w
+        # rebalance at month end if needed
+        if is_rebalance_month(ts):
+            w = w_target.copy()
+
+    out = pd.Series(idx_level, index=mpx.index, name="PortfolioIndex")
     return out
 
 # =============================
@@ -544,7 +614,12 @@ def render_results(
         show_tbl = comp_tbl[["지표", "포맷_포트", "포맷_벤치"]].rename(columns={
             "포맷_포트": "포트폴리오", "포맷_벤치": bench_label or "벤치마크"
         })
-        st.dataframe(show_tbl, hide_index=True, use_container_width=True)
+        # 사용자가 요청한 순서로 정렬 & 정적 테이블(소팅 비활성)
+        order = [
+            "Start Balance", "End Balance", "CAGR", "Volatility", "Max Drawdown", "Sharpe", "Sortino", "CAGR / UW(years)"
+        ]
+        show_tbl = show_tbl.set_index("지표").reindex(order).reset_index()
+        st.table(show_tbl)
     else:
         st.caption("지표가 없습니다.")
 
@@ -608,7 +683,8 @@ def build_proxy_table_with_autofix(df_in: pd.DataFrame) -> Tuple[pd.DataFrame, D
     return pd.DataFrame(rows), pmap
 
 
-proxy_table, proxy_map = build_proxy_table_with_autofix(base_df)
+# 지연 계산: 입력 안정성을 위해 즉시 매핑하지 않고, 실행 시 또는 리포트 탭에서 계산
+proxy_map = BASE_PROXY_MAP
 
 
 def _append_total_row(df: pd.DataFrame) -> pd.DataFrame:
@@ -628,8 +704,7 @@ def _label_for(t):
     return label_map.get(t, "알 수 없음")
 
 
-editor_df["추종지수(자동)"] = editor_df["티커"].apply(_label_for)
-
+# 입력 안정성을 위해 "추종지수(자동)" 열 제거 (타이핑 중 지연/리렌더 방지)
 edited_df_out = st.sidebar.data_editor(
     editor_df,
     num_rows="dynamic",
@@ -637,6 +712,9 @@ edited_df_out = st.sidebar.data_editor(
     key="portfolio_editor",
     column_config={
         "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, IAU, BCI"),
+        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
+    },
+),
         "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
         "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="자동 매핑 라벨", disabled=True),
     },
@@ -664,7 +742,25 @@ with colA:
 with colB:
     end_date = st.date_input("종료일", value=date.today())
 
+# (1) 배당 재투자 여부
 reinvest = st.sidebar.checkbox("배당 재투자(Adj Close 사용)", value=True, help="체크 해제 시 Close 사용 (총수익 제외)")
+
+# (2) 리밸런싱 주기 설정
+rebalance_choice = st.sidebar.selectbox(
+    "리밸런싱 주기",
+    ["없음(바이앤홀드)", "월간", "분기", "반기", "연간"],
+    index=0,
+)
+REBAL_MAP = {
+    "없음(바이앤홀드)": "NONE",
+    "월간": "MONTHLY",
+    "분기": "QUARTERLY",
+    "반기": "SEMI",
+    "연간": "ANNUAL",
+}
+rebalance_rule = REBAL_MAP[rebalance_choice]
+
+# (3) 현금흐름
 initial_amount = st.sidebar.number_input("초기 금액", min_value=0, value=10_000_000, step=100_000)
 monthly_contrib = st.sidebar.number_input("월 납입액", min_value=0, value=0, step=100_00)
 
@@ -714,13 +810,17 @@ if run_bt:
                 })
 
                 # === Portfolio index ===
-                port = build_index_from_assets(
+                # === Portfolio index (with rebalancing) ===
+                # 실행 시에만 매핑 자동 점검/보정 수행 → 입력 중 지연 방지
+                rep_map, proxy_map_rt = audit_and_autofix_proxies(dfp["티커"].tolist(), BASE_PROXY_MAP)
+                port = build_index_from_assets_with_rebal(
                     tickers=dfp["티커"].tolist(),
                     weights=weights.tolist(),
-                    proxy_map=proxy_map,
+                    proxy_map=proxy_map_rt,
                     start_date=start_date,
                     end_date=end_date,
-                    reinvest=reinvest
+                    reinvest=reinvest,
+                    rebalance=rebalance_rule,
                 )
                 m = perf_metrics(port)
 
@@ -736,13 +836,14 @@ if run_bt:
                 if bench_spec is not None:
                     b_assets, b_weights = bench_spec
                     # NOTE: 같은 프록시 매핑 로직/하이브리드 규칙 적용
-                    raw_bench = build_index_from_assets(
+                    raw_bench = build_index_from_assets_with_rebal(
                         tickers=b_assets,
                         weights=b_weights,
-                        proxy_map=proxy_map,
+                        proxy_map=proxy_map_rt,
                         start_date=start_date,
                         end_date=end_date,
-                        reinvest=reinvest
+                        reinvest=reinvest,
+                        rebalance=rebalance_rule,
                     )
                     # (1) 포트폴리오 기간과 동일하게 트리밍
                     if raw_bench is not None and not raw_bench.empty and not port.empty:
@@ -767,9 +868,12 @@ if run_bt:
                 })
 
     with main_tab2:
-        # 매핑 리포트
-        rep, _ = audit_and_autofix_proxies(st.session_state["portfolio_rows"]["티커"].tolist(), BASE_PROXY_MAP)
-        st.dataframe(rep, use_container_width=True)
+        st.subheader("매핑 리포트 (요청 시 계산)")
+        if st.button("매핑 점검 실행", key="run_mapping_report"):
+            rep, _ = audit_and_autofix_proxies(st.session_state["portfolio_rows"]["티커"].tolist(), BASE_PROXY_MAP)
+            st.dataframe(rep, use_container_width=True)
+        else:
+            st.caption("입력 속도를 위해 기본적으로 매핑을 지연시킵니다. 필요할 때 위 버튼을 눌러 점검하세요.")
 
 # =============================
 # Result-first / Intro visibility control
@@ -797,7 +901,12 @@ else:
     with main_tab1:
         st.info("좌측 사이드바에서 포트폴리오를 입력하고 ‘백테스트 실행’을 눌러 결과를 확인하세요.")
     with main_tab2:
-        st.dataframe(proxy_table, use_container_width=True)
+        st.subheader("매핑 리포트 (요청 시 계산)")
+        if st.button("매핑 점검 실행", key="run_mapping_report_intro"):
+            rep, _ = audit_and_autofix_proxies(st.session_state["portfolio_rows"]["티커"].tolist(), BASE_PROXY_MAP)
+            st.dataframe(rep, use_container_width=True)
+        else:
+            st.caption("입력 중 렉을 줄이기 위해 자동 점검을 지연합니다. 필요 시 버튼을 눌러 확인하세요.")
 
 st.markdown("---")
 st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")

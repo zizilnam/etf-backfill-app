@@ -223,6 +223,27 @@ def build_hybrid_series_from_proxy(etf_ticker: str, proxy_ticker: str, start: st
 # Metrics & Helpers
 # =============================
 
+def _as_series(obj, name: str) -> pd.Series:
+    """Safely convert DataFrame/Series to a 1D Series and set name."""
+    if isinstance(obj, pd.DataFrame):
+        if obj.shape[1] == 1:
+            s = obj.iloc[:, 0]
+        else:
+            # squeeze() may still return DataFrame if >1 columns; pick first
+            try:
+                s = obj.squeeze()
+                if isinstance(s, pd.DataFrame):
+                    s = s.iloc[:, 0]
+            except Exception:
+                s = obj.iloc[:, 0]
+    else:
+        s = obj
+    try:
+        s.name = name
+    except Exception:
+        pass
+    return s
+
 def to_monthly(s: pd.Series) -> pd.Series:
     return s.resample("M").last()
 
@@ -366,7 +387,7 @@ def build_index_from_assets_with_rebal(
     # 2) Monthly last prices & returns
     mpx = []
     for t in tickers:
-        s = to_monthly(price_map[t]).rename(t)
+        s = _as_series(to_monthly(price_map[t]), t)
         mpx.append(s)
     if not mpx:
         return pd.Series(dtype=float)
@@ -699,12 +720,6 @@ editor_df = _append_total_row(base_df)
 
 
 # 입력 안정성을 위해 "추종지수(자동)" 열 제거 (타이핑 중 지연/리렌더 방지)
-# (권장) 에디터에 보여줄 열만 유지
-editor_df = editor_df[["티커", "비율 (%)"]]
-
-# (권장) 에디터에 보여줄 열만 유지
-editor_df = editor_df[["티커", "비율 (%)"]]
-
 edited_df_out = st.sidebar.data_editor(
     editor_df,
     num_rows="dynamic",
@@ -712,11 +727,14 @@ edited_df_out = st.sidebar.data_editor(
     key="portfolio_editor",
     column_config={
         "티커": st.column_config.TextColumn("티커", help="예: QQQ, IEF, IAU, BCI"),
-        "비율 (%)": st.column_config.NumberColumn(
-            "비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"
-        ),
-    }
-)  # ← 여기 콤마(,) 없음! 들여쓰기 맞춰야 함.
+        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
+    },
+),
+        "비율 (%)": st.column_config.NumberColumn("비율 (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
+        "추종지수(자동)": st.column_config.TextColumn("추종지수(자동)", help="자동 매핑 라벨", disabled=True),
+    },
+    disabled=["추종지수(자동)"],
+)
 
 st.session_state["portfolio_rows"] = edited_df_out.iloc[:-1][["티커", "비율 (%)"]]
 
@@ -906,12 +924,4 @@ else:
             st.caption("입력 중 렉을 줄이기 위해 자동 점검을 지연합니다. 필요 시 버튼을 눌러 확인하세요.")
 
 st.markdown("---")
-st.caption(
-    "ⓘ 참고: '배당 재투자' 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. "
-    "끄면 Close(가격수익) 기준입니다. "
-    "'월 납입액'은 매월 말 성과 반영 후 적립으로 가정합니다. "
-    "리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다."
-)
-
-
-
+st.caption("ⓘ 참고: ‘배당 재투자’ 옵션을 켜면 Adjusted Close(총수익 근사)를 사용합니다. 끄면 Close(가격수익) 기준입니다. ‘월 납입액’은 매월 말 성과 반영 후 적립으로 가정합니다. 리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다.") 기준입니다. ‘월 납입액’은 매월 말 리밸런싱 없이 단순 적립으로 가정합니다.")

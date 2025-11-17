@@ -557,7 +557,8 @@ def create_sns_image(
     백테스트 결과를 파스텔 감성 SNS 카드(PNG)로 생성.
     - 누적 금액 라인 차트
     - 핵심 KPI 4개
-    - 포트폴리오 구성 파이차트
+    - 포트폴리오 구성 파이차트 + 구성 리스트
+    (슬로건/카피 없음)
     """
     if value_series is None or value_series.empty:
         return None
@@ -568,10 +569,17 @@ def create_sns_image(
 
     gs = gridspec.GridSpec(3, 1, figure=fig, height_ratios=[2.0, 1.2, 1.3])
 
-    # 1) 누적 금액 라인 차트
+    # ---------------- 1) 누적 금액 라인 차트 ----------------
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.set_facecolor("white")
-    ax1.plot(value_series.index, value_series.values, label="포트폴리오", linewidth=2.2, color="#7C8CF8")
+
+    ax1.plot(
+        value_series.index,
+        value_series.values,
+        label="포트폴리오",
+        linewidth=2.2,
+        color="#7C8CF8",
+    )
     if bench_value_series is not None and not bench_value_series.empty:
         ax1.plot(
             bench_value_series.index,
@@ -582,35 +590,35 @@ def create_sns_image(
             color="#B0B8C8",
             alpha=0.9,
         )
+
     ax1.set_title("누적 금액 추이", fontsize=12, pad=6)
     ax1.grid(alpha=0.2)
     ax1.legend(fontsize=8, loc="upper left")
     ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}"))
 
-    # 전체 타이틀 / 기간
+    # 전체 타이틀 / 기간 / 부제
     fig.text(0.5, 0.97, title, ha="center", va="top", fontsize=17, fontweight="bold")
     fig.text(
         0.5, 0.952,
         f"{start_dt.isoformat()} ~ {end_dt.isoformat()}",
-        ha="center", va="top", fontsize=9, color="#666666"
+        ha="center", va="top", fontsize=9, color="#666666",
     )
     fig.text(
         0.5, 0.938,
         "ETF 백테스트 & 현금흐름 시뮬레이션",
-        ha="center", va="top", fontsize=9
+        ha="center", va="top", fontsize=9,
     )
 
-    # 2) KPI 영역
+    # ---------------- 2) KPI 카드 영역 ----------------
     ax2 = fig.add_subplot(gs[1, 0])
     ax2.axis("off")
 
-    kpi_items = []
     if metrics:
         kpi_items = [
-            ("CAGR", metrics.get("CAGR")),
-            ("변동성(연)", metrics.get("Vol")),
-            ("최대낙폭", metrics.get("MDD")),
-            ("샤프", metrics.get("Sharpe")),
+            ("CAGR",        metrics.get("CAGR")),
+            ("변동성(연)",  metrics.get("Vol")),
+            ("최대낙폭",    metrics.get("MDD")),
+            ("샤프",        metrics.get("Sharpe")),
         ]
     else:
         kpi_items = [("CAGR", None), ("변동성(연)", None), ("최대낙폭", None), ("샤프", None)]
@@ -632,6 +640,7 @@ def create_sns_image(
         y0 = 0.55 - row * 0.55
         w = 0.43
         h = 0.45
+
         ax2.add_patch(
             plt.Rectangle(
                 (x0, y0),
@@ -644,8 +653,8 @@ def create_sns_image(
             )
         )
         ax2.text(
-            x0 + w/2,
-            y0 + h*0.65,
+            x0 + w / 2,
+            y0 + h * 0.65,
             label,
             ha="center",
             va="center",
@@ -653,8 +662,8 @@ def create_sns_image(
             color="#444444",
         )
         ax2.text(
-            x0 + w/2,
-            y0 + h*0.32,
+            x0 + w / 2,
+            y0 + h * 0.32,
             _fmt_kpi(label, val),
             ha="center",
             va="center",
@@ -663,14 +672,16 @@ def create_sns_image(
             color="#222222",
         )
 
-    # 3) 포트폴리오 구성 파이 + 슬로건
+    # ---------------- 3) 포트폴리오 구성 ----------------
     ax3 = fig.add_subplot(gs[2, 0])
     ax3.set_facecolor("white")
+    ax3.axis("off")
 
-    # 왼쪽에 파이차트, 오른쪽에 텍스트 배치하기 위해 좌표 조정
     if comp_df is not None and not comp_df.empty:
+        # 왼쪽에 파이차트
         sizes = comp_df["비중(%)"].astype(float).tolist()
         labels = comp_df["티커"].astype(str).tolist()
+
         ax3_pie = ax3.inset_axes([0.02, 0.05, 0.55, 0.9])
         ax3_pie.pie(
             sizes,
@@ -680,38 +691,40 @@ def create_sns_image(
             textprops={"fontsize": 7},
         )
         ax3_pie.axis("equal")
-    else:
-        ax3.text(0.2, 0.5, "구성 데이터 없음", ha="center", va="center", fontsize=9)
 
-    ax3.axis("off")
-    ax3.text(
-        0.68, 0.65,
-        "꾸준함의 힘 📈",
-        transform=ax3.transAxes,
-        ha="left",
-        va="center",
-        fontsize=13,
-        fontweight="bold",
-        color="#333333",
-    )
-    ax3.text(
-        0.68, 0.42,
-        "매달 조금씩,\n장기적으로 모아가는\n나만의 포트폴리오",
-        transform=ax3.transAxes,
-        ha="left",
-        va="top",
-        fontsize=9,
-        color="#555555",
-    )
-    ax3.text(
-        0.68, 0.16,
-        "@my_investing_log",
-        transform=ax3.transAxes,
-        ha="left",
-        va="center",
-        fontsize=8,
-        color="#888888",
-    )
+        # 오른쪽에 구성 리스트 텍스트
+        ax3.text(
+            0.68, 0.78,
+            "포트폴리오 구성",
+            transform=ax3.transAxes,
+            ha="left",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
+            color="#333333",
+        )
+
+        for i, (tkr, w) in enumerate(zip(labels, comp_df["비중(%)"].round(1))):
+            y = 0.62 - i * 0.12
+            ax3.text(
+                0.68, y,
+                f"{tkr}  {w:.1f}%",
+                transform=ax3.transAxes,
+                ha="left",
+                va="center",
+                fontsize=9,
+                color="#555555",
+            )
+    else:
+        ax3.text(
+            0.5, 0.5,
+            "포트폴리오 구성 데이터 없음",
+            transform=ax3.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#666666",
+        )
 
     fig.tight_layout(rect=[0.03, 0.04, 0.97, 0.93])
 
@@ -1094,4 +1107,5 @@ st.caption(
     "'월 납입액'은 매월 말 성과 반영 후 적립으로 가정합니다. "
     "리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다."
 )
+
 

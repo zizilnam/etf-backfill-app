@@ -554,132 +554,299 @@ def create_sns_image(
     title: str = "나의 ETF 포트폴리오",
 ) -> Optional[io.BytesIO]:
     """
-    인스타그램 1:1 비율, C 스타일(그래프 크게 + KPI 아래 배치)
-    - 파이차트 없음 (미니멀)
-    - 포트 구성은 텍스트 한 줄
+    인스타그램 1:1 비율, D 스타일(카드뉴스형 대시보드)
+    - 상단: 최종 잔고 + 총 수익률
+    - 중단: KPI 카드 3개 (리포트형)
+    - 하단: 포트 구성 텍스트 + 벤치마크 요약
     """
     if value_series is None or value_series.empty:
         return None
 
+    # 기본 수치 계산
+    start_val = float(value_series.iloc[0])
+    end_val = float(value_series.iloc[-1])
+    total_ret = end_val / start_val - 1 if start_val != 0 else np.nan
+
+    bench_total_ret = None
+    if bench_value_series is not None and not bench_value_series.empty:
+        b_start = float(bench_value_series.iloc[0])
+        b_end = float(bench_value_series.iloc[-1])
+        bench_total_ret = b_end / b_start - 1 if b_start != 0 else None
+
+    # 1:1 정사각형
     fig = plt.figure(figsize=(8, 8), dpi=200)
     bg_color = "#F8F7F4"
     fig.patch.set_facecolor(bg_color)
 
-    # 2개 영역: 그래프(상단), KPI + 구성(하단)
+    # 상/중/하 3단 레이아웃
     gs = gridspec.GridSpec(
-        2, 1, figure=fig,
-        height_ratios=[2.5, 1.0]  # 그래프 크게, KPI 작게
+        3, 1, figure=fig,
+        height_ratios=[1.1, 1.4, 0.9],
     )
 
-    # ─────────────── 1) 누적 금액 그래프 (전체의 70%) ───────────────
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.set_facecolor("white")
+    # ---------------- 1) 상단 헤더: 제목 + 기간 + 총 수익 ----------------
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_top.axis("off")
+    ax_top.set_facecolor(bg_color)
 
-    ax1.plot(
-        value_series.index,
-        value_series.values,
-        label="포트폴리오",
-        linewidth=2.0,
-        color="#4A78FF",
-    )
-    if bench_value_series is not None and not bench_value_series.empty:
-        ax1.plot(
-            bench_value_series.index,
-            bench_value_series.values,
-            label=bench_label or "벤치마크",
-            linewidth=1.6,
-            linestyle="--",
-            color="#A6AEC5",
-            alpha=0.9,
+    # 상단 박스
+    ax_top.add_patch(
+        plt.Rectangle(
+            (0.02, 0.08),
+            0.96,
+            0.84,
+            transform=ax_top.transAxes,
+            facecolor="white",
+            edgecolor="none",
+            alpha=1.0,
         )
-
-    ax1.grid(alpha=0.15, color="#DDDDDD")
-    ax1.legend(fontsize=8, loc="upper left", frameon=False)
-    ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}"))
-    ax1.tick_params(labelsize=8)
-
-    # 제목
-    fig.text(
-        0.5, 0.98, title,
-        ha="center", va="top",
-        fontsize=18, fontweight="bold", color="#222222",
     )
-    fig.text(
-        0.5, 0.965,
+
+    # 제목 / 기간
+    ax_top.text(
+        0.05, 0.80,
+        title,
+        transform=ax_top.transAxes,
+        ha="left", va="center",
+        fontsize=16, fontweight="bold", color="#222222",
+    )
+    ax_top.text(
+        0.05, 0.63,
         f"{start_dt.isoformat()} ~ {end_dt.isoformat()}",
-        ha="center", va="top",
-        fontsize=9, color="#666666",
+        transform=ax_top.transAxes,
+        ha="left", va="center",
+        fontsize=9.5, color="#666666",
     )
-    ax1.set_title("누적 금액 추이", fontsize=11, pad=6, color="#333333")
 
-    # ─────────────── 2) KPI + 포트 구성 (하단 30%) ───────────────
-    ax2 = fig.add_subplot(gs[1, 0])
-    ax2.axis("off")
-    ax2.set_facecolor(bg_color)
-
-    # KPI 4개
-    if metrics:
-        kpi_items = [
-            ("CAGR",        metrics.get("CAGR")),
-            ("변동성(연)",  metrics.get("Vol")),
-            ("최대낙폭",    metrics.get("MDD")),
-            ("샤프",        metrics.get("Sharpe")),
-        ]
+    # 최종 잔고 + 총 수익률 (오른쪽 큰 숫자)
+    ax_top.text(
+        0.95, 0.76,
+        f"{end_val:,.0f}원",
+        transform=ax_top.transAxes,
+        ha="right", va="center",
+        fontsize=16, fontweight="bold", color="#222222",
+    )
+    if np.isfinite(total_ret):
+        ax_top.text(
+            0.95, 0.57,
+            f"총 수익률  {total_ret*100:,.2f}%",
+            transform=ax_top.transAxes,
+            ha="right", va="center",
+            fontsize=11, color="#1C7C54" if total_ret >= 0 else "#C0392B",
+        )
     else:
-        kpi_items = [("CAGR", None), ("변동성(연)", None),
-                     ("최대낙폭", None), ("샤프", None)]
-
-    def _fmt_kpi(name, v):
-        if v is None or not np.isfinite(v):
-            return "—"
-        if name in {"CAGR", "변동성(연)", "최대낙폭"}:
-            return f"{v*100:,.2f}%"
-        if name == "샤프":
-            return f"{v:.2f}"
-        return str(v)
-
-    # 좌우 2열로 정렬
-    x_positions = [0.10, 0.55]
-    y_positions = [0.70, 0.35]
-
-    for idx, (label, val) in enumerate(kpi_items):
-        col = idx % 2
-        row = idx // 2
-        x = x_positions[col]
-        y = y_positions[row]
-
-        ax2.text(
-            x, y + 0.12,
-            _fmt_kpi(label, val),
-            transform=ax2.transAxes,
-            ha="left", va="center",
-            fontsize=14, fontweight="bold", color="#222222",
-        )
-        ax2.text(
-            x, y - 0.02,
-            label,
-            transform=ax2.transAxes,
-            ha="left", va="center",
-            fontsize=8.5, color="#666666",
+        ax_top.text(
+            0.95, 0.57,
+            "총 수익률  —",
+            transform=ax_top.transAxes,
+            ha="right", va="center",
+            fontsize=11, color="#666666",
         )
 
-    # ─────────────── 포트 구성 텍스트 (하단 고정) ───────────────
+    # 벤치마크 vs 차이
+    if bench_total_ret is not None:
+        diff = total_ret - bench_total_ret if total_ret is not None else None
+        diff_str = "—"
+        diff_color = "#666666"
+        if diff is not None and np.isfinite(diff):
+            sign = "+" if diff >= 0 else ""
+            diff_str = f"{sign}{diff*100:,.2f}%p"
+            diff_color = "#1C7C54" if diff >= 0 else "#C0392B"
+
+        ax_top.text(
+            0.05, 0.36,
+            f"벤치마크({bench_label or '벤치마크'}) 대비 초과 수익률",
+            transform=ax_top.transAxes,
+            ha="left", va="center",
+            fontsize=9, color="#777777",
+        )
+        ax_top.text(
+            0.95, 0.36,
+            diff_str,
+            transform=ax_top.transAxes,
+            ha="right", va="center",
+            fontsize=11, color=diff_color,
+        )
+    else:
+        ax_top.text(
+            0.05, 0.36,
+            "벤치마크 미선택",
+            transform=ax_top.transAxes,
+            ha="left", va="center",
+            fontsize=9, color="#AAAAAA",
+        )
+
+    # ---------------- 2) 중단: KPI 카드 3개 (카드뉴스 느낌) ----------------
+    ax_mid = fig.add_subplot(gs[1, 0])
+    ax_mid.axis("off")
+    ax_mid.set_facecolor(bg_color)
+
+    # KPI 값들
+    m = metrics or {}
+    cagr   = m.get("CAGR")
+    vol    = m.get("Vol")
+    mdd    = m.get("MDD")
+    uw_m   = m.get("UW_months")
+    sharpe = m.get("Sharpe")
+    sortino = m.get("Sortino")
+
+    def fmt_pct(v):
+        return "—" if v is None or not np.isfinite(v) else f"{v*100:,.2f}%"
+
+    def fmt_num(v):
+        return "—" if v is None or not np.isfinite(v) else f"{v:.2f}"
+
+    def fmt_uw(v):
+        return "—" if v is None or not np.isfinite(v) else f"{v:.0f}개월"
+
+    cards = [
+        {
+            "title": "성장 지표",
+            "lines": [
+                ("CAGR", fmt_pct(cagr)),
+                ("변동성(연)", fmt_pct(vol)),
+            ],
+        },
+        {
+            "title": "위험 지표",
+            "lines": [
+                ("최대낙폭", fmt_pct(mdd)),
+                ("언더워터 기간", fmt_uw(uw_m)),
+            ],
+        },
+        {
+            "title": "위험 대비 성과",
+            "lines": [
+                ("Sharpe", fmt_num(sharpe)),
+                ("Sortino", fmt_num(sortino)),
+            ],
+        },
+    ]
+
+    # 3개 카드 가로 배치
+    card_width = 0.28
+    gap = 0.05
+    x_starts = [0.04, 0.36, 0.68]
+
+    for i, card in enumerate(cards):
+        x0 = x_starts[i]
+        y0 = 0.08
+        w = card_width
+        h = 0.84
+
+        ax_mid.add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                w, h,
+                transform=ax_mid.transAxes,
+                facecolor="white",
+                edgecolor="none",
+                alpha=1.0,
+            )
+        )
+        # 카드 제목
+        ax_mid.text(
+            x0 + 0.04, y0 + h - 0.16,
+            card["title"],
+            transform=ax_mid.transAxes,
+            ha="left", va="center",
+            fontsize=10, fontweight="bold", color="#333333",
+        )
+        # 내용 2줄
+        for j, (label, val_str) in enumerate(card["lines"]):
+            yy = (y0 + h - 0.32) - j * 0.22
+            ax_mid.text(
+                x0 + 0.04, yy,
+                label,
+                transform=ax_mid.transAxes,
+                ha="left", va="center",
+                fontsize=8.5, color="#777777",
+            )
+            ax_mid.text(
+                x0 + w - 0.04, yy,
+                val_str,
+                transform=ax_mid.transAxes,
+                ha="right", va="center",
+                fontsize=11, fontweight="bold", color="#222222",
+            )
+
+    # ---------------- 3) 하단: 포트 구성 + 간단 요약 ----------------
+    ax_bot = fig.add_subplot(gs[2, 0])
+    ax_bot.axis("off")
+    ax_bot.set_facecolor(bg_color)
+
+    # 상단 border 박스
+    ax_bot.add_patch(
+        plt.Rectangle(
+            (0.02, 0.15),
+            0.96, 0.75,
+            transform=ax_bot.transAxes,
+            facecolor="white",
+            edgecolor="none",
+            alpha=1.0,
+        )
+    )
+
+    ax_bot.text(
+        0.05, 0.78,
+        "포트폴리오 구성",
+        transform=ax_bot.transAxes,
+        ha="left", va="center",
+        fontsize=11, fontweight="bold", color="#333333",
+    )
+
     if comp_df is not None and not comp_df.empty:
-        text_list = [f"{tkr} {w:.1f}%" for tkr, w in
-                     zip(comp_df["티커"], comp_df["비중(%)"])]
-        comp_text = " · ".join(text_list)
-
-        ax2.text(
-            0.5, 0.08,
-            comp_text,
-            transform=ax2.transAxes,
-            ha="center", va="center",
-            fontsize=9, color="#555555",
+        # 티커 + 비중 텍스트 한 줄 또는 두 줄로
+        pairs = [f"{tkr} {w:.1f}%" for tkr, w in zip(comp_df["티커"], comp_df["비중(%)"])]
+        text_line = " · ".join(pairs)
+        # 길면 두 줄로 나누기
+        if len(text_line) > 60:
+            # 대략 반으로 쪼개기
+            mid = len(pairs) // 2
+            line1 = " · ".join(pairs[:mid])
+            line2 = " · ".join(pairs[mid:])
+            ax_bot.text(
+                0.05, 0.57,
+                line1,
+                transform=ax_bot.transAxes,
+                ha="left", va="center",
+                fontsize=9, color="#555555",
+            )
+            ax_bot.text(
+                0.05, 0.40,
+                line2,
+                transform=ax_bot.transAxes,
+                ha="left", va="center",
+                fontsize=9, color="#555555",
+            )
+        else:
+            ax_bot.text(
+                0.05, 0.57,
+                text_line,
+                transform=ax_bot.transAxes,
+                ha="left", va="center",
+                fontsize=9, color="#555555",
+            )
+    else:
+        ax_bot.text(
+            0.05, 0.57,
+            "구성 데이터 없음",
+            transform=ax_bot.transAxes,
+            ha="left", va="center",
+            fontsize=9, color="#AAAAAA",
         )
 
-    fig.tight_layout(rect=[0.03, 0.03, 0.97, 0.93])
+    # 하단 작은 설명
+    ax_bot.text(
+        0.05, 0.24,
+        "※ 백테스트 결과는 과거 데이터 기반이며, 미래 수익을 보장하지 않습니다.",
+        transform=ax_bot.transAxes,
+        ha="left", va="center",
+        fontsize=8, color="#999999",
+    )
 
-    # 출력 버퍼
+    fig.tight_layout(rect=[0.03, 0.03, 0.97, 0.96])
+
     buf = io.BytesIO()
     fig.savefig(
         buf,
@@ -1061,6 +1228,7 @@ st.caption(
     "'월 납입액'은 매월 말 성과 반영 후 적립으로 가정합니다. "
     "리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다."
 )
+
 
 
 

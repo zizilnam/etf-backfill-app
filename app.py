@@ -273,21 +273,37 @@ def perf_metrics(series: pd.Series) -> dict:
     rets = m_idx.pct_change().dropna()
     if rets.empty:
         return out
+
     years = (m_idx.index[-1] - m_idx.index[0]).days / 365.25
     cagr = (m_idx.iloc[-1] / m_idx.iloc[0]) ** (1/years) - 1 if years > 0 else np.nan
     vol = rets.std() * math.sqrt(12)
     dd, uw_months = drawdown_series(m_idx)
     mdd = dd.min() if not dd.empty else np.nan
+
+    # Sharpe (rf=0)
     mean_ann = rets.mean() * 12
     sharpe = (mean_ann / vol) if vol and np.isfinite(vol) and vol != 0 else np.nan
+
+    # Sortino (rf=0): downside stdev
     downside = rets[rets < 0]
     ddv = downside.std() * math.sqrt(12) if not downside.empty else np.nan
     sortino = (mean_ann / ddv) if ddv and np.isfinite(ddv) and ddv != 0 else np.nan
+
     uw_years = uw_months / 12.0
     cagr_div_uw = (cagr / uw_years) if uw_years and uw_years > 0 else np.nan
-    out.update({"CAGR": cagr, "Vol": vol, "MDD": mdd, "Sharpe": sharpe, "Sortino": sortino,
-                "UW_months": uw_months, "UW_years": uw_years, "CAGR_div_UW": cagr_div_UW})
+
+    out.update({
+        "CAGR": cagr,
+        "Vol": vol,
+        "MDD": mdd,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "UW_months": uw_months,
+        "UW_years": uw_years,
+        "CAGR_div_UW": cagr_div_uw,   # ← 여기 변수명 통일!
+    })
     return out
+
 
 def simulate_value_from_index(port_index: pd.Series, initial_amount: float, monthly_contrib: float) -> pd.Series:
     """
@@ -1078,3 +1094,4 @@ st.caption(
     "'월 납입액'은 매월 말 성과 반영 후 적립으로 가정합니다. "
     "리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다."
 )
+

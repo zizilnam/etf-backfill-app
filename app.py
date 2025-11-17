@@ -554,28 +554,24 @@ def create_sns_image(
     title: str = "나의 ETF 포트폴리오",
 ) -> Optional[io.BytesIO]:
     """
-    인스타그램용 정사각형(1:1) 대시보드 이미지 생성.
-    레이아웃 (위→아래):
-      1. 제목 / 기간 / 부제
-      2. 누적 금액 그래프
-      3. KPI 4개 (2x2)
-      4. 포트폴리오 구성 (작은 파이 + 리스트)
+    인스타그램 1:1 비율, C 스타일(그래프 크게 + KPI 아래 배치)
+    - 파이차트 없음 (미니멀)
+    - 포트 구성은 텍스트 한 줄
     """
     if value_series is None or value_series.empty:
         return None
 
-    # 1:1 비율
     fig = plt.figure(figsize=(8, 8), dpi=200)
-    bg_color = "#F8F7F4"  # 따뜻한 화이트 톤
+    bg_color = "#F8F7F4"
     fig.patch.set_facecolor(bg_color)
 
-    # 세로 3분할: 그래프 / KPI / 구성
+    # 2개 영역: 그래프(상단), KPI + 구성(하단)
     gs = gridspec.GridSpec(
-        3, 1, figure=fig,
-        height_ratios=[1.8, 1.1, 1.0],  # 위쪽 그래프 비중 조금 더 크게
+        2, 1, figure=fig,
+        height_ratios=[2.5, 1.0]  # 그래프 크게, KPI 작게
     )
 
-    # ───────────────── 1) 누적 금액 라인 차트 ─────────────────
+    # ─────────────── 1) 누적 금액 그래프 (전체의 70%) ───────────────
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.set_facecolor("white")
 
@@ -597,35 +593,31 @@ def create_sns_image(
             alpha=0.9,
         )
 
-    ax1.grid(alpha=0.18, color="#DDDDDD")
+    ax1.grid(alpha=0.15, color="#DDDDDD")
     ax1.legend(fontsize=8, loc="upper left", frameon=False)
     ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}"))
     ax1.tick_params(labelsize=8)
 
-    # 제목·기간·부제는 Figure 레벨에서 처리 (상단 10%)
+    # 제목
     fig.text(
-        0.5, 0.97, title,
+        0.5, 0.98, title,
         ha="center", va="top",
         fontsize=18, fontweight="bold", color="#222222",
     )
     fig.text(
-        0.5, 0.955,
+        0.5, 0.965,
         f"{start_dt.isoformat()} ~ {end_dt.isoformat()}",
         ha="center", va="top",
         fontsize=9, color="#666666",
     )
-    fig.text(
-        0.5, 0.94,
-        "ETF 백테스트 & 현금흐름 시뮬레이션",
-        ha="center", va="top",
-        fontsize=9, color="#777777",
-    )
     ax1.set_title("누적 금액 추이", fontsize=11, pad=6, color="#333333")
 
-    # ───────────────── 2) KPI 카드 영역 (정사각형 중앙) ─────────────────
+    # ─────────────── 2) KPI + 포트 구성 (하단 30%) ───────────────
     ax2 = fig.add_subplot(gs[1, 0])
     ax2.axis("off")
+    ax2.set_facecolor(bg_color)
 
+    # KPI 4개
     if metrics:
         kpi_items = [
             ("CAGR",        metrics.get("CAGR")),
@@ -646,100 +638,60 @@ def create_sns_image(
             return f"{v:.2f}"
         return str(v)
 
-    box_colors = ["#EEF1FF", "#E6FAF0", "#FFECE6", "#EAF1FF"]
-    for i, (label, val) in enumerate(kpi_items):
-        row = i // 2
-        col = i % 2
-        x0 = 0.06 + col * 0.47
-        y0 = 0.55 - row * 0.55
-        w = 0.42
-        h = 0.45
+    # 좌우 2열로 정렬
+    x_positions = [0.10, 0.55]
+    y_positions = [0.70, 0.35]
 
-        # 박스
-        ax2.add_patch(
-            plt.Rectangle(
-                (x0, y0),
-                w, h,
-                transform=ax2.transAxes,
-                facecolor=box_colors[i],
-                edgecolor="none",
-                alpha=0.98,
-            )
-        )
-        # 숫자(위) + 라벨(아래) 구조
+    for idx, (label, val) in enumerate(kpi_items):
+        col = idx % 2
+        row = idx // 2
+        x = x_positions[col]
+        y = y_positions[row]
+
         ax2.text(
-            x0 + w / 2,
-            y0 + h * 0.6,
+            x, y + 0.12,
             _fmt_kpi(label, val),
-            ha="center", va="center",
+            transform=ax2.transAxes,
+            ha="left", va="center",
             fontsize=14, fontweight="bold", color="#222222",
         )
         ax2.text(
-            x0 + w / 2,
-            y0 + h * 0.28,
+            x, y - 0.02,
             label,
-            ha="center", va="center",
-            fontsize=8.5, color="#555555",
-        )
-
-    # ───────────────── 3) 포트폴리오 구성 (하단) ─────────────────
-    ax3 = fig.add_subplot(gs[2, 0])
-    ax3.set_facecolor("white")
-    ax3.axis("off")
-
-    if comp_df is not None and not comp_df.empty:
-        sizes = comp_df["비중(%)"].astype(float).tolist()
-        labels = comp_df["티커"].astype(str).tolist()
-
-        # 왼쪽: 작은 도넛 파이
-        ax3_pie = ax3.inset_axes([0.05, 0.10, 0.42, 0.8])
-        wedges, texts = ax3_pie.pie(
-            sizes,
-            startangle=90,
-            wedgeprops=dict(width=0.4),
-        )
-        ax3_pie.axis("equal")
-
-        # 라벨은 오른쪽 텍스트로만 (그래프 라벨 과밀 방지)
-        ax3.text(
-            0.55, 0.82,
-            "포트폴리오 구성",
-            transform=ax3.transAxes,
+            transform=ax2.transAxes,
             ha="left", va="center",
-            fontsize=11, fontweight="bold", color="#333333",
+            fontsize=8.5, color="#666666",
         )
 
-        for i, (tkr, w) in enumerate(zip(labels, comp_df["비중(%)"].round(1))):
-            y = 0.65 - i * 0.14
-            ax3.text(
-                0.55, y,
-                f"{tkr}  {w:.1f}%",
-                transform=ax3.transAxes,
-                ha="left", va="center",
-                fontsize=9.5, color="#555555",
-            )
-    else:
-        ax3.text(
-            0.5, 0.5,
-            "포트폴리오 구성 데이터 없음",
-            transform=ax3.transAxes,
+    # ─────────────── 포트 구성 텍스트 (하단 고정) ───────────────
+    if comp_df is not None and not comp_df.empty:
+        text_list = [f"{tkr} {w:.1f}%" for tkr, w in
+                     zip(comp_df["티커"], comp_df["비중(%)"])]
+        comp_text = " · ".join(text_list)
+
+        ax2.text(
+            0.5, 0.08,
+            comp_text,
+            transform=ax2.transAxes,
             ha="center", va="center",
-            fontsize=10, color="#666666",
+            fontsize=9, color="#555555",
         )
 
-    fig.tight_layout(rect=[0.03, 0.04, 0.97, 0.93])
+    fig.tight_layout(rect=[0.03, 0.03, 0.97, 0.93])
 
+    # 출력 버퍼
     buf = io.BytesIO()
     fig.savefig(
         buf,
         format="png",
-        dpi=200,
+        dpi=250,
         bbox_inches="tight",
         facecolor=fig.get_facecolor(),
     )
     buf.seek(0)
     plt.close(fig)
     return buf
+
 
 
 # ===== NEW: 결과 렌더러 (벤치마크 비교 포함, 금액 축) =====
@@ -1109,6 +1061,7 @@ st.caption(
     "'월 납입액'은 매월 말 성과 반영 후 적립으로 가정합니다. "
     "리밸런싱 주기는 선택한 주기에 맞춰 목표 비중으로 복원됩니다."
 )
+
 
 
 
